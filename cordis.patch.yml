@@ -1,0 +1,35 @@
+# Interactive terminal (TUI) profile: a persistent REPL over dsh-base.
+# No Host, HTTP server, or Web runtime — the agent runs entirely in this
+# process, reading stdin and writing stdout. Sessions persist under the same
+# JSONL store the Web surface uses, so `--resume` picks up any session.
+
+- id: system-prompt
+  config:
+    persona: >-
+      You are a coding agent powered by the {{model}} model. Your working directory is {{cwd}}.
+      The user talks to you through an interactive terminal; answer directly and concisely.
+
+# The shared module-reload HMR row stays off; a terminal REPL does not need
+# live patch reloads and they would fight the readline loop.
+- id: hmr
+  disabled: true
+
+- id: tools
+  config:
+    # Keep the same temporary process-wide Code Mode opt-in as the Web surface.
+    mode: !!js process.env.DSH_TOOLS_MODE
+
+- insert:
+    # Code Mode is a core execution capability, not a Web component.
+    - id: code-runtime
+      name: '@deepseek-ai/dsh-code-runtime-worker-thread'
+
+    # Parses `--new/--resume/--list` and publishes the tuiStartup service.
+    - id: tui-startup
+      name: ./tui-startup.mjs
+      inject: [cmdlineArgs]
+
+    # The interactive driver: creates/resumes one Agent, runs the REPL.
+    - id: tui-runner
+      name: ./tui-runner.mjs
+      inject: [tuiStartup, agentDefaultModel, agents, llm, sessions]
