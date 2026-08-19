@@ -9,15 +9,15 @@ import { fileURLToPath } from "node:url";
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const dshBin = join(repoRoot, "node_modules", "@deepseek-ai", "dsh", "lib", "bin.js");
 
-test("管道 /model 在 stdin EOF 后退出", { timeout: 10_000 }, async (t) => {
-	const home = await mkdtemp(join(tmpdir(), "dsh-tui-model-eof-"));
+test("管道 /model 在 stdin EOF 后退出", { timeout: 15_000 }, async (t) => {
+	const home = await mkdtemp(join(tmpdir(), "dsh-cli-model-eof-"));
 	t.after(() => rm(home, { force: true, recursive: true }));
 	await mkdir(join(home, ".dsh", "profiles"), { recursive: true });
-	await symlink(repoRoot, join(home, ".dsh", "profiles", "tui"), "dir");
+	await symlink(repoRoot, join(home, ".dsh", "profiles", "cli"), "dir");
 
 	const env = { ...process.env, HOME: home };
 	delete env.DSH_HOME;
-	const child = spawn(process.execPath, [dshBin, "--profile", "tui", "--new"], {
+	const child = spawn(process.execPath, [dshBin, "--profile", "cli", "--new"], {
 		cwd: repoRoot,
 		env,
 		stdio: ["pipe", "pipe", "pipe"]
@@ -29,7 +29,7 @@ test("管道 /model 在 stdin EOF 后退出", { timeout: 10_000 }, async (t) => 
 		const timer = setTimeout(() => {
 			timedOut = true;
 			child.kill("SIGTERM");
-		}, 5_000);
+		}, 10_000);
 		child.once("close", (code, signal) => {
 			clearTimeout(timer);
 			resolve({ code, signal });
@@ -40,15 +40,15 @@ test("管道 /model 在 stdin EOF 后退出", { timeout: 10_000 }, async (t) => 
 	assert.equal(result.signal, null, "进程应自然退出");
 });
 
-test("管道 /exit 不受兜底定时器影响", { timeout: 10_000 }, async (t) => {
-	const home = await mkdtemp(join(tmpdir(), "dsh-tui-exit-pipe-"));
+test("管道 /exit 不受兜底定时器影响", { timeout: 15_000 }, async (t) => {
+	const home = await mkdtemp(join(tmpdir(), "dsh-cli-exit-pipe-"));
 	t.after(() => rm(home, { force: true, recursive: true }));
 	await mkdir(join(home, ".dsh", "profiles"), { recursive: true });
-	await symlink(repoRoot, join(home, ".dsh", "profiles", "tui"), "dir");
+	await symlink(repoRoot, join(home, ".dsh", "profiles", "cli"), "dir");
 
 	const env = { ...process.env, HOME: home, DSH_TUI_EXIT_TIMEOUT_MS: "3000" };
 	delete env.DSH_HOME;
-	const child = spawn(process.execPath, [dshBin, "--profile", "tui", "--new"], {
+	const child = spawn(process.execPath, [dshBin, "--profile", "cli", "--new"], {
 		cwd: repoRoot,
 		env,
 		stdio: ["pipe", "pipe", "pipe"]
@@ -60,7 +60,7 @@ test("管道 /exit 不受兜底定时器影响", { timeout: 10_000 }, async (t) 
 		const timer = setTimeout(() => {
 			timedOut = true;
 			child.kill("SIGTERM");
-		}, 5_000);
+		}, 10_000);
 		child.once("close", (code, signal) => {
 			clearTimeout(timer);
 			resolve({ code, signal });

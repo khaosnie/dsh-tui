@@ -1,13 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { createInterface, clearLine, cursorTo } from "node:readline";
 import { installModelSelection } from "@deepseek-ai/dsh-agent";
+import { credentialRef } from "@deepseek-ai/dsh-credentials";
 import { createUserMessage, ReasoningEffortId } from "@deepseek-ai/dsh-llm";
 import { SessionId } from "@deepseek-ai/dsh-session";
 import { startTuiUi } from "./tui-ui.mjs";
 import { sanitizeDisplayValue, sanitizeTerminalText, summarizeToolArguments } from "./tui-safety.mjs";
 
 /**
- * @deepseek-ai/dsh-tui-runner — interactive terminal agent driver.
+ * @deepseek-ai/dsh-cli-runner — interactive terminal agent driver.
  *
  * Boots dsh-base without any Host/HTTP layer, creates or resumes one Agent
  * through the core registry, then runs a readline REPL: each ordinary input
@@ -16,7 +17,7 @@ import { sanitizeDisplayValue, sanitizeTerminalText, summarizeToolArguments } fr
  * where this process left off.
  */
 export const name = "tui-runner";
-export const inject = ["agentDefaultModel", "agents", "llm", "sessions"];
+export const inject = ["agentDefaultModel", "agents", "credentials", "llm", "sessions"];
 
 const BANNER = String.raw`
                           ▄▄
@@ -54,6 +55,7 @@ const COMMANDS = [
 	"/list",
 	"/clear",
 	"/model",
+	"/model add",
 	"/compact"
 ];
 const COMMAND_PALETTE = [
@@ -65,8 +67,15 @@ const COMMAND_PALETTE = [
 	{ name: "/list", description: "list saved sessions" },
 	{ name: "/clear", description: "clear the transcript" },
 	{ name: "/model", description: "choose provider / model" },
+	{ name: "/model add", description: "add DeepSeek API key" },
 	{ name: "/compact", description: "compact conversation history" }
 ];
+
+const DEEPSEEK_API_KEY_REF = credentialRef("DEEPSEEK_API_KEY");
+const DEEPSEEK_DEFAULT_SELECTION = {
+	provider: "deepseek-official",
+	model: "deepseek-v4-flash"
+};
 
 const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY);
 const colorEnabled =
@@ -86,6 +95,9 @@ const ANSI = {
 	cyan: "36",
 	bold: "1"
 };
+
+const STREAM_CHUNK_CHARS = Number.parseInt(process.env.DSH_TUI_STREAM_CHUNK_CHARS ?? "160", 10) || 160;
+const STREAM_CHUNK_DELAY_MS = Number.parseInt(process.env.DSH_TUI_STREAM_CHUNK_DELAY_MS ?? "20", 10) || 20;
 
 function style(kind, text) {
 	if (!colorEnabled) return text;
@@ -115,6 +127,18 @@ function formatTokens(value) {
 	if (value < 1000) return String(Math.round(value));
 	if (value >= 1000000) return `${(value / 1000000).toFixed(1)}M`;
 	return `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)}k`;
+}
+
+function formatElapsed(ms) {
+	const seconds = Math.max(0, Math.floor(ms / 1000));
+	if (seconds < 60) return `${seconds}s`;
+	const minutes = Math.floor(seconds / 60);
+	const rest = seconds % 60;
+	return `${minutes}m${String(rest).padStart(2, "0")}s`;
+}
+
+function sleep(ms) {
+	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function colorizeMarkdown(text) {
@@ -257,12 +281,12 @@ async function streamTurn(agent, fromSeq, hooks) {
 	const off = agent.ctx.on("session/event", () => {
 		notify?.();
 	});
-	const drain = () => {
+	const drain = async () => {
 		const events = agent.session.events;
-		for (; lastSeq < events.length; lastSeq++) hooks.consume(events[lastSeq]);
+		for (; lastSeq < events.length; lastSeq++) await hooks.consume(events[lastSeq]);
 	};
 	try {
-		drain();
+		await drain();
 		while (true) {
 			const result = await Promise.race([
 				idle.then(() => "idle"),
@@ -270,18 +294,18 @@ async function streamTurn(agent, fromSeq, hooks) {
 					notify = () => resolve("ev");
 				})
 			]);
-			drain();
+			await drain();
 			if (result === "idle") break;
 		}
 		await idle;
-		drain();
+		await drain();
 	} finally {
 		off();
 	}
 }
 
 async function repl(ctx, services, io) {
-	const { agents, defaultModel, sessions, startup, persistence, llm } = services;
+	const { agents, defaultModel, sessions, startup, persistence, llm, credentials } = services;
 	const compaction = ctx.get("compaction");
 	const tokenMeter = ctx.get("tokenMeter");
 	const cursor = createCursorGuard(io.stdout, () => Boolean(ui));
@@ -294,9 +318,12 @@ async function repl(ctx, services, io) {
 	let rl = null;
 	let spinnerTimer = null;
 	let spinnerOn = false;
+	let turnStatusTimer = null;
+	let turnStartedAt = 0;
 	let modelCatalog = [];
 	let ui = null;
 	let turnFailed = false;
+	let modelSetupHintShown = false;
 	const verboseTools = process.env.DSH_TUI_VERBOSE_TOOLS === "1";
 
 	const writeOut = (text) => {
@@ -315,6 +342,18 @@ async function repl(ctx, services, io) {
 	};
 
 	const say = (text) => writeOut(text.endsWith("\n") ? text : `${text}\n`);
+
+	const writeOutProgressively = async (text) => {
+		if (!text) return;
+		if (!interactive || !ui || STREAM_CHUNK_DELAY_MS <= 0 || text.length <= STREAM_CHUNK_CHARS) {
+			writeOut(text);
+			return;
+		}
+		for (let index = 0; index < text.length; index += STREAM_CHUNK_CHARS) {
+			writeOut(text.slice(index, index + STREAM_CHUNK_CHARS));
+			await sleep(STREAM_CHUNK_DELAY_MS);
+		}
+	};
 
 	const stopSpinner = () => {
 		if (!spinnerOn) return;
@@ -351,10 +390,30 @@ async function repl(ctx, services, io) {
 		spinnerTimer = setInterval(draw, 80);
 	};
 
+	const stopTurnStatusTimer = () => {
+		if (!turnStatusTimer) return;
+		clearInterval(turnStatusTimer);
+		turnStatusTimer = null;
+	};
+
+	const startTurnStatusTimer = () => {
+		if (!ui) return;
+		stopTurnStatusTimer();
+		turnStartedAt = Date.now();
+		const update = () => ui?.status({ turn: "running", turnElapsed: formatElapsed(Date.now() - turnStartedAt) });
+		update();
+		turnStatusTimer = setInterval(update, 1000);
+		turnStatusTimer.unref?.();
+	};
+
 	const setBusy = (next) => {
 		busy = next;
 		if (ui) {
-			ui.status({ turn: next ? "running" : "idle" });
+			if (next) startTurnStatusTimer();
+			else {
+				stopTurnStatusTimer();
+				ui.status({ turn: "idle", turnElapsed: undefined });
+			}
 			return;
 		}
 		if (!rl) return;
@@ -363,6 +422,7 @@ async function repl(ctx, services, io) {
 
 	const restoreTerminal = () => {
 		stopSpinner();
+		stopTurnStatusTimer();
 		cursor.show();
 	};
 
@@ -375,16 +435,29 @@ async function repl(ctx, services, io) {
 		if (ui) ui.status({ models: modelCatalog });
 	};
 
+	const maybeShowModelSetupHint = async () => {
+		if (modelSetupHintShown || !current || current.agent.options.provider !== DEEPSEEK_DEFAULT_SELECTION.provider) return;
+		try {
+			const info = await credentials.describe(DEEPSEEK_API_KEY_REF);
+			if (info?.configured) return;
+			modelSetupHintShown = true;
+			say(style("cyan", "[model setup] No DeepSeek API key detected. Run /model add to add one."));
+		} catch {}
+	};
+
 	const complete = (line) => {
 		const trimmed = line.trimStart();
 		const command = trimmed.split(/\s+/, 1)[0];
 		if (!trimmed.startsWith("/")) return [[], line];
 		if (command === "/model") {
 			const prefix = trimmed.slice("/model".length).trimStart();
-			const matches = modelCatalog
-				.map(modelSpec)
-				.filter((spec) => spec.toLowerCase().startsWith(prefix.toLowerCase()))
-				.map((spec) => `/model ${spec}`);
+			const matches = [
+				...(prefix === "" || "add".startsWith(prefix.toLowerCase()) ? ["/model add"] : []),
+				...modelCatalog
+					.map(modelSpec)
+					.filter((spec) => spec.toLowerCase().startsWith(prefix.toLowerCase()))
+					.map((spec) => `/model ${spec}`)
+			];
 			return [matches.length ? matches : ["/model"], line];
 		}
 		const matches = COMMANDS.filter((candidate) => candidate.startsWith(command));
@@ -441,6 +514,7 @@ async function repl(ctx, services, io) {
 		if (interactive) {
 			say(style("dim", resumeId ? `[resumed ${sanitizeDisplayValue(resumeId)}]` : `[new session ${sanitizeDisplayValue(current.agent.id)}]`));
 		}
+		await maybeShowModelSetupHint();
 		await current.agent.whenIdle();
 	};
 
@@ -468,7 +542,7 @@ async function repl(ctx, services, io) {
 		}
 	};
 
-	const consumeEvent = (state, ev) => {
+	const consumeEvent = async (state, ev) => {
 		if (ev.type === "assistant/message") {
 			const content = ev.data.message.content;
 			const reasoning = content
@@ -490,7 +564,7 @@ async function repl(ctx, services, io) {
 					const delta = reasoning.startsWith(state.printedReasoning)
 						? reasoning.slice(state.printedReasoning.length)
 						: `\n${reasoning}`;
-					writeOut(delta.replaceAll("\n", "\nThink › "));
+					await writeOutProgressively(delta.replaceAll("\n", "\nThink › "));
 					state.sawOutput = true;
 				}
 				state.printedReasoning = reasoning;
@@ -505,7 +579,7 @@ async function repl(ctx, services, io) {
 				state.assistantStarted = true;
 			}
 			if (text.startsWith(state.printed)) {
-				writeOut(text.slice(state.printed.length));
+				await writeOutProgressively(text.slice(state.printed.length));
 			} else {
 				writeOut(`\n${colorizeMarkdown(text)}`);
 			}
@@ -650,10 +724,67 @@ async function repl(ctx, services, io) {
 		await handleModel(modelSpec(modelCatalog[index]));
 	};
 
+	const handleModelAdd = async () => {
+		if (!credentials?.describe || !credentials?.set) {
+			say(style("red", "credential storage is not available in this profile"));
+			return;
+		}
+		let info;
+		try {
+			info = await credentials.describe(DEEPSEEK_API_KEY_REF);
+		} catch (error) {
+			say(style("red", `could not inspect DeepSeek API key: ${sanitizeDisplayValue(error.message)}`));
+			return;
+		}
+		if (info?.configured && !info.writable) {
+			say(
+				style(
+					"green",
+					`DeepSeek API key is already configured from ${sanitizeDisplayValue(info.source ?? "a read-only source")}.`
+				)
+			);
+			say(style("dim", "[no local credential was changed]"));
+			return;
+		}
+		if (!ui?.promptSecret) {
+			say(style("red", "/model add needs an interactive TUI so the API key can be hidden while typing"));
+			return;
+		}
+		say(style("dim", "[paste your DeepSeek API key below; input is hidden, Esc cancels]"));
+		const entered = await ui.promptSecret("DeepSeek API key › ");
+		if (entered === null) {
+			say(style("dim", "[DeepSeek API key setup cancelled]"));
+			return;
+		}
+		const value = String(entered).trim();
+		if (!value) {
+			say(style("dim", info?.configured ? "[kept existing DeepSeek API key]" : "[no API key saved]"));
+			return;
+		}
+		try {
+			await credentials.set(DEEPSEEK_API_KEY_REF, value);
+			await defaultModel.saveSelection(DEEPSEEK_DEFAULT_SELECTION);
+			await refreshModelCatalog();
+			say(style("green", "DeepSeek API key saved."));
+			say(
+				style(
+					"dim",
+					`[default model set to ${DEEPSEEK_DEFAULT_SELECTION.provider}/${DEEPSEEK_DEFAULT_SELECTION.model}]`
+				)
+			);
+		} catch (error) {
+			say(style("red", `could not save DeepSeek API key: ${sanitizeDisplayValue(error.message)}`));
+		}
+	};
+
 	const handleModel = async (arg) => {
 		const sel = defaultModel.currentSelection();
 		if (!arg) {
 			await pickModel();
+			return;
+		}
+		if (arg === "add") {
+			await handleModelAdd();
 			return;
 		}
 		const parts = arg.split(/\s+/);
@@ -758,6 +889,7 @@ async function repl(ctx, services, io) {
 							`  /list           list persisted sessions for this project\n` +
 							`  /clear          clear the terminal screen\n` +
 							`  /model          choose a registered provider/model\n` +
+							`  /model add      add a DeepSeek API key\n` +
 							`  /model <name> [effort]   switch the default model (next /new or /resume)\n` +
 							`  /compact        compact the conversation history\n` +
 							`anything else is sent to the agent as a message.`
@@ -934,12 +1066,13 @@ function fail(io, error) {
 async function run(ctx, io) {
 	await ctx.get("loader")?.await();
 	const agents = ctx.get("agents");
+	const credentials = ctx.get("credentials");
 	const defaultModel = ctx.get("agentDefaultModel");
 	const sessions = ctx.get("sessions");
 	const startup = ctx.get("tuiStartup");
 	const persistence = ctx.get("sessionPersistence");
 	const llm = ctx.get("llm");
-	if (agents === void 0 || defaultModel === void 0 || sessions === void 0 || startup === void 0) return;
+	if (agents === void 0 || credentials === void 0 || defaultModel === void 0 || sessions === void 0 || startup === void 0) return;
 
 	if (startup.list) {
 		await printSessionList(persistence, process.cwd(), (t) => io.stdout.write(t), { withTitles: true });
@@ -947,7 +1080,7 @@ async function run(ctx, io) {
 		return;
 	}
 
-	await repl(ctx, { agents, defaultModel, sessions, startup, persistence, llm }, io);
+	await repl(ctx, { agents, credentials, defaultModel, sessions, startup, persistence, llm }, io);
 }
 
 export function apply(ctx) {

@@ -33,5 +33,5 @@
 
 ### Known issues
 
-- `dsh --profile tui --list` 存在间歇性挂起（输出后进程不退出）：已复现于 launcher 0.1.0-rc.6 与 0.1.0-rc.7，定位指向 launcher 层 HMR watcher 生命周期，profile 层无法修复；CI smoke 已用 `timeout 30s` 兜底，建议上游修复后升级验证。
+- `dsh --profile cli --list` 存在间歇性挂起（输出后进程不退出）：已复现于 launcher 0.1.0-rc.6 与 0.1.0-rc.7，定位指向 launcher 层 HMR watcher 生命周期，profile 层无法修复；CI smoke 已用 `timeout 30s` 兜底，建议上游修复后升级验证。
 - 管道模式 `--resume` 后立即关闭 stdin 可能偶发丢行（launcher 引导期竞态，基线同现）。

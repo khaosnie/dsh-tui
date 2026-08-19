@@ -1,6 +1,6 @@
-# dsh-tui
+# dsh-cli
 
-`dsh-tui` 是一个运行在 **DeepSeek Harness (DSH)** 之上的终端交互 profile。它不需要启动 Web 服务，也不监听端口，直接在终端里创建和恢复 agent 会话。
+`dsh-cli` 是一个运行在 **DeepSeek Harness (DSH)** 之上的终端交互 CLI profile。它不需要启动 Web 服务，也不监听端口，直接在终端里创建和恢复 agent 会话。
 
 ## 特性
 
@@ -26,35 +26,56 @@ npm install --global @deepseek-ai/dsh@0.1.0-rc.6
 dsh --version
 ```
 
-第二条命令应输出 `0.1.0-rc.6`。同一 `0.1.0` RC 系列的较新版本也可能可用，但 DSH 的 profile 组合仍在快速演进，升级后应运行 `dsh --profile tui --dump-config` 验证。
+第二条命令应输出 `0.1.0-rc.6`。同一 `0.1.0` RC 系列的较新版本也可能可用，但 DSH 的 profile 组合仍在快速演进，升级后应运行 `dsh --profile cli --dump-config` 验证。
 
 本项目是一个 DSH profile。推荐把仓库放在任意开发目录，然后链接到 DSH profile 目录：
 
 ```bash
-git clone <repo-url> dsh-tui-profile
-cd dsh-tui-profile
+git clone https://github.com/khaosnie/dsh-cli.git dsh-cli
+cd dsh-cli
 npm ci
 
 mkdir -p ~/.dsh/profiles
-ln -s "$PWD" ~/.dsh/profiles/tui
+ln -s "$PWD" ~/.dsh/profiles/cli
 ```
 
-如果你已经有 `~/.dsh/profiles/tui`，请先确认它是否指向旧版本目录，再决定是否替换。
+如果你已经有 `~/.dsh/profiles/cli`，请先确认它是否指向旧版本目录，再决定是否替换。
+
+如果你把本仓库地址交给其它 agent，它通常可以按上述步骤完成安装；但模型 API key、代理网关地址等凭据仍需要用户自己提供，不应让 agent 从其它项目或聊天记录中猜测。安装完成后，agent 应提醒用户两种模型配置方式：在 TUI 里输入 `/model add` 快速添加 DeepSeek，或按“首次配置模型”的高级方法手动配置其它 provider。
 
 DSH 也支持通过 `dsh plugin --profile <name> add <local-package>` 添加本地 package。当前仓库作为完整 profile 使用时，symlink 方式最直接；如果后续封装成标准 DSH plugin，可以再切换到 plugin 安装方式。
 
 ## 首次配置模型
 
-`dsh-tui` 不直接保存模型密钥。DeepSeek 的最简路径只需要 API key：profile base 已提供默认路由 `deepseek-official/deepseek-v4-flash`，不需要 `DSH_MODEL`。
+有两种配置方法：
+
+- **推荐新手：在 TUI 里添加 DeepSeek API key。** 最快，只需要一个 key。
+- **高级用户：手动编辑 DSH 设置。** 用于其它 provider、代理网关或自定义模型。
+
+### 方法一：TUI 添加 DeepSeek
+
+DeepSeek 的最简路径只需要 API key。启动后输入：
+
+```text
+/model add
+```
+
+按提示粘贴 DeepSeek API key 即可。输入会被遮罩，不会写入对话 transcript；key 会保存到 DSH 的本地 credentials，不会写进项目仓库。默认模型会设置为 `deepseek-official/deepseek-v4-flash`。
+
+如果启动时检测到当前使用 DeepSeek 默认模型但还没有配置 `DEEPSEEK_API_KEY`，TUI 会在启动区提示运行 `/model add`。
+
+也可以用环境变量手动配置：
 
 ```bash
 export DEEPSEEK_API_KEY="<your-api-key>"
 ```
 
+### 方法二：手动配置其它模型
+
 如需显式切换默认模型，把选择写入 DSH 用户设置（不要把 key 写入此文件）：
 
 ```yaml
- # ~/.dsh/settings.yaml
+# ~/.dsh/settings.yaml
 agent-default-model:
   provider: deepseek-official
   model: deepseek-v4-flash
@@ -91,23 +112,30 @@ llm-pi-ai:
 ## 使用
 
 ```bash
-dsh --profile tui                  # 自动恢复当前目录最后有持久化事件的会话，没有则新建
-dsh --profile tui --new            # 强制新会话
-dsh --profile tui --resume <id>    # 恢复指定会话
-dsh --profile tui --list           # 列出本项目会话
-dsh --profile tui --quiet          # 不显示启动 logo
+dsh --profile cli                  # 自动恢复当前目录最后有持久化事件的会话，没有则新建
+dsh --profile cli --new            # 强制新会话
+dsh --profile cli --resume <id>    # 恢复指定会话
+dsh --profile cli --list           # 列出本项目会话
+dsh --profile cli --quiet          # 不显示启动 logo
 ```
 
-如果想要短命令，可以在自己的 shell 配置里加 alias：
+DSH 官方 CLI 暂时不会把自定义 profile 自动注册成 `dsh <profile>` 子命令。若想使用 `dsh cli`，可以在自己的 shell 配置里加一个 function：
 
 ```bash
-alias deepseek='dsh --profile tui'
+dsh() {
+  if [ "$1" = "cli" ]; then
+    shift
+    command dsh --profile cli "$@"
+  else
+    command dsh "$@"
+  fi
+}
 ```
 
 管道模式也可用：
 
 ```bash
-printf 'say hello in one word\n' | dsh --profile tui --new
+printf 'say hello in one word\n' | dsh --profile cli --new
 ```
 
 管道模式会按输入顺序串行处理每一行。用户取消的 turn 不算失败；任一 provider 或 agent turn 失败时，stdin EOF 后进程以非零退出，适合脚本检测。
@@ -122,6 +150,7 @@ printf 'say hello in one word\n' | dsh --profile tui --new
 /list                    列出当前项目会话
 /clear                   清空当前屏幕
 /model                   选择 provider / model
+/model add               添加 DeepSeek API key
 /model <name> [effort]   切换默认模型
 /compact                 压缩上下文
 ```
@@ -148,7 +177,7 @@ cordis.yml         profile 根配置
 npm run check
 ```
 
-该命令包含语法与纯函数单测，不会启动 agent，也不会改动本机会话。CI 还会在临时 `HOME` 中执行 `dsh --profile tui --help`、`--list`、`--dump-config` 的 profile smoke test，不会请求模型。涉及终端交互的改动，建议在真实终端中手动测试。
+该命令包含语法与纯函数单测，不会启动 agent，也不会改动本机会话。CI 还会在临时 `HOME` 中执行 `dsh --profile cli --help`、`--list`、`--dump-config` 的 profile smoke test，不会请求模型。涉及终端交互的改动，建议在真实终端中手动测试。
 
 ## 安全边界
 

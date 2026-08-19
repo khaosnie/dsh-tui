@@ -1,6 +1,6 @@
 # 贡献指南
 
-感谢你帮助改进 `dsh-tui`。
+感谢你帮助改进 `dsh-cli`。
 
 ## 本地开发
 
@@ -9,14 +9,14 @@ npm ci
 npm run check
 ```
 
-CI 也会在临时 `HOME` 中把仓库链接为 `tui` profile，并运行 `dsh --profile tui --help`、`--list` 和 `--dump-config`。这些 smoke test 只验证 profile 组合与配置，不请求模型或消耗 token。
+CI 也会在临时 `HOME` 中把仓库链接为 `cli` profile，并运行 `dsh --profile cli --help`、`--list` 和 `--dump-config`。这些 smoke test 只验证 profile 组合与配置，不请求模型或消耗 token。
 
 如果要做交互测试，可以把仓库链接为本地 DSH profile：
 
 ```bash
 mkdir -p ~/.dsh/profiles
-ln -s "$PWD" ~/.dsh/profiles/tui
-dsh --profile tui --new
+ln -s "$PWD" ~/.dsh/profiles/cli
+dsh --profile cli --new
 ```
 
 ## 建议测试

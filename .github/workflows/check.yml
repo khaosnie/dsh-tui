@@ -32,16 +32,16 @@ jobs:
         run: |
           smoke_home="$(mktemp -d)"
           mkdir -p "$smoke_home/.dsh/profiles"
-          ln -s "$GITHUB_WORKSPACE" "$smoke_home/.dsh/profiles/tui"
-          timeout 30s env HOME="$smoke_home" npx --no-install dsh --profile tui --help
+          ln -s "$GITHUB_WORKSPACE" "$smoke_home/.dsh/profiles/cli"
+          timeout 30s env HOME="$smoke_home" npx --no-install dsh --profile cli --help
           # Known launcher race (rc.6/rc.7): --list prints the session list then
           # intermittently hangs before exiting (deterministic on Linux/inotify,
           # intermittent on macOS/kqueue). The output is the contract we test
           # here; timeout 30s reaps the process, so a hang is a known issue
           # (see CHANGELOG Known issues), not a CI failure.
-          list_out="$(timeout 30s env HOME="$smoke_home" npx --no-install dsh --profile tui --list 2>&1 || true)"
+          list_out="$(timeout 30s env HOME="$smoke_home" npx --no-install dsh --profile cli --list 2>&1 || true)"
           echo "$list_out"
           grep -q "no persisted sessions" <<<"$list_out" \
             || grep -qE '^[[:space:]]*[0-9a-fA-F-]{8,}' <<<"$list_out" \
             || { echo "::error::dsh --list produced unexpected output"; exit 1; }
-          timeout 30s env HOME="$smoke_home" npx --no-install dsh --profile tui --dump-config
+          timeout 30s env HOME="$smoke_home" npx --no-install dsh --profile cli --dump-config

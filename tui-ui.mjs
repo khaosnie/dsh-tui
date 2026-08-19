@@ -505,6 +505,10 @@ function commandMatches(input, commands) {
 	return commands.filter((command) => command.name.startsWith(query.split(/\s+/, 1)[0]));
 }
 
+function maskSecret(input) {
+	return String(input).replace(/[^\n]/g, "*");
+}
+
 function App({ api, commands, initialState }) {
 	const { exit } = useApp();
 	const { setCursorPosition } = useCursor();
@@ -525,9 +529,11 @@ function App({ api, commands, initialState }) {
 	const totalRowsRef = useRef(0);
 	const limits = useRef({ maxOffset: 0, pageSize: 1 });
 	const ignoreReturnUntil = useRef(0);
-	const matches = commandMatches(input, commands);
+	const secretPrompt = state.secretPrompt ?? null;
+	const displayInput = secretPrompt ? maskSecret(input) : input;
+	const matches = secretPrompt ? [] : commandMatches(input, commands);
 	const models = state.models ?? [];
-	const choices = (modelMenu ? models : matches).slice(0, 9);
+	const choices = secretPrompt ? [] : (modelMenu ? models : matches).slice(0, 9);
 	const active = choices[selected];
 	const transcript = state.lines ?? [];
 	const document = useMemo(() => [
@@ -541,18 +547,18 @@ function App({ api, commands, initialState }) {
 	const documentColumns = Math.max(1, colCount - 1);
 	const rowsDoc = useMemo(() => documentRows(document, documentColumns), [document, documentColumns]);
 	const totalRows = rowsDoc.length;
-	const menuRows = modelMenu ? models.slice(0, 9).length + 1 : matches.length > 0 ? matches.slice(0, 9).length : 0;
+	const menuRows = secretPrompt ? 0 : modelMenu ? models.slice(0, 9).length + 1 : matches.length > 0 ? matches.slice(0, 9).length : 0;
 	const statusRows = 2;
 	const hintRows = 2;
-	const prompt = state.turn === "running" ? "⋯ " : "› ";
+	const prompt = secretPrompt ? secretPrompt.prompt : state.turn === "running" ? "⋯ " : "› ";
 	const innerWidth = Math.max(1, colCount);
 	const safeCaret = clampIndex(caret, input.length);
 	const safeAnchor = anchor == null ? null : clampIndex(anchor, input.length);
 	const selection = safeAnchor == null || safeAnchor === safeCaret
 		? null
 		: { start: Math.min(safeAnchor, safeCaret), end: Math.max(safeAnchor, safeCaret) };
-	const inputRows = layoutComposer(prompt, input, innerWidth);
-	const caretPos = caretView(inputRows, input, safeCaret);
+	const inputRows = layoutComposer(prompt, displayInput, innerWidth);
+	const caretPos = caretView(inputRows, displayInput, safeCaret);
 	const maxInputRows = Math.max(1, Math.min(8, rowCount - menuRows - statusRows - hintRows - 6));
 	let visibleStart = 0;
 	if (inputRows.length > maxInputRows) {
@@ -577,6 +583,7 @@ function App({ api, commands, initialState }) {
 	const visibleEndRow = Math.max(0, totalRows - offset);
 	const visibleStartRow = Math.max(0, visibleEndRow - viewportRows);
 	const visibleRows = rowsDoc.slice(visibleStartRow, visibleEndRow);
+	const visibleRowSignature = visibleRows.map((row) => row.key).join("\0");
 	const pageSize = Math.max(Math.floor(viewportRows * 0.8), 1);
 	limits.current = { maxOffset, pageSize };
 	const caretVisibleRow = caretPos.row - visibleStart;
@@ -597,7 +604,7 @@ function App({ api, commands, initialState }) {
 			if (bounds.width > 0 || bounds.height > 0) measured.set(rowIndex, bounds);
 		}
 		rowBounds.current = measured;
-	}, [visibleStartRow, visibleEndRow, colCount, rowCount, documentPaneRows]);
+	}, [visibleStartRow, visibleEndRow, visibleRowSignature, colCount, rowCount, documentPaneRows]);
 
 	useMouseWheel((direction) => {
 		const { maxOffset: limit, pageSize: size } = limits.current;
@@ -669,7 +676,26 @@ function App({ api, commands, initialState }) {
 		setSelected((previous) => Math.min(previous, Math.max(0, choices.length - 1)));
 	}, [input, modelMenu, choices.length]);
 
+	useEffect(() => {
+		if (!secretPrompt) return;
+		setInput("");
+		setCaret(0);
+		setAnchor(null);
+		setSelected(0);
+		setModelMenu(false);
+		setDocSelection(null);
+	}, [secretPrompt?.id]);
+
 	const submit = async (line) => {
+		if (secretPrompt) {
+			const value = input;
+			setInput("");
+			setCaret(0);
+			setAnchor(null);
+			setDocSelection(null);
+			api.resolveSecret(value);
+			return;
+		}
 		const text = line.trim();
 		if (!text) return;
 		if (state.turn === "running" && !text.startsWith("/")) return;
@@ -690,6 +716,7 @@ function App({ api, commands, initialState }) {
 	};
 
 	const selectedRange = () => {
+		if (secretPrompt) return null;
 		if (safeAnchor == null || safeAnchor === safeCaret) return null;
 		return { from: Math.min(safeAnchor, safeCaret), to: Math.max(safeAnchor, safeCaret) };
 	};
@@ -711,6 +738,13 @@ function App({ api, commands, initialState }) {
 		if (inputKey.eventType === "release") return;
 		if (key.startsWith("[<")) return;
 		if ((inputKey.ctrl || inputKey.meta) && key.toLowerCase() === "c") {
+			if (secretPrompt) {
+				setInput("");
+				setCaret(0);
+				setAnchor(null);
+				api.resolveSecret(null);
+				return;
+			}
 			const range = selectedRange();
 			if (range) {
 				copyText(input.slice(range.from, range.to));
@@ -734,13 +768,18 @@ function App({ api, commands, initialState }) {
 			moveCaretTo(input.length, false);
 			return;
 		}
-		if (!modelMenu && isComposerNewline(key, inputKey)) {
+		if (!secretPrompt && !modelMenu && isComposerNewline(key, inputKey)) {
 			ignoreReturnUntil.current = Date.now() + 100;
 			insertText("\n");
 			return;
 		}
 		if (inputKey.escape) {
-			if (modelMenu) setModelMenu(false);
+			if (secretPrompt) {
+				setInput("");
+				setCaret(0);
+				setAnchor(null);
+				api.resolveSecret(null);
+			} else if (modelMenu) setModelMenu(false);
 			else if (selection) setAnchor(null);
 			else if (docSelection) setDocSelection(null);
 			return;
@@ -794,7 +833,7 @@ function App({ api, commands, initialState }) {
 		if (inputKey.upArrow || inputKey.downArrow) {
 			const goingUp = inputKey.upArrow;
 			if (inputKey.shift || inputRows.length > 1) {
-				const next = hitTestComposer(inputRows, input, caretPos.row + (goingUp ? -1 : 1), caretPos.col);
+				const next = hitTestComposer(inputRows, displayInput, caretPos.row + (goingUp ? -1 : 1), caretPos.col);
 				if (inputKey.shift || next !== safeCaret) {
 					moveCaretTo(next, inputKey.shift);
 					return;
@@ -817,6 +856,10 @@ function App({ api, commands, initialState }) {
 		}
 		if (inputKey.return) {
 			if (Date.now() < ignoreReturnUntil.current) return;
+			if (secretPrompt) {
+				void submit(input);
+				return;
+			}
 			if (state.turn === "running" && !modelMenu && !input.trim().startsWith("/")) return;
 			if (modelMenu && active) {
 				setModelMenu(false);
@@ -954,7 +997,7 @@ function App({ api, commands, initialState }) {
 			h(
 				Text,
 				{ dimColor: true, wrap: "truncate-end" },
-				`${contextLabel(state)}  ·  Turn ${state.turn ?? "idle"}`
+				`${contextLabel(state)}  ·  Turn ${state.turn ?? "idle"}${state.turnElapsed ? ` ${state.turnElapsed}` : ""}`
 			),
 			h(
 				Text,
@@ -967,7 +1010,13 @@ function App({ api, commands, initialState }) {
 
 export function startTuiUi(options) {
 	let listener = null;
+	let secretRequest = null;
+	let secretSeq = 0;
 	let state = { lines: [], turn: "idle", ...options.initialState };
+	const publish = (update) => {
+		state = { ...state, ...update };
+		listener?.(update);
+	};
 	const api = {
 		subscribe(next) {
 			listener = next;
@@ -976,17 +1025,20 @@ export function startTuiUi(options) {
 			};
 		},
 		submit: options.onSubmit,
-		cancel: options.onCancel
+		cancel: options.onCancel,
+		resolveSecret(value) {
+			if (!secretRequest) return;
+			const request = secretRequest;
+			secretRequest = null;
+			publish({ secretPrompt: null });
+			request.resolve(value);
+		}
 	};
 	const instance = render(h(App, { api, commands: options.commands, initialState: state }), {
 		alternateScreen: true,
 		exitOnCtrlC: false,
 		kittyKeyboard: { mode: "enabled", flags: ["disambiguateEscapeCodes"] }
 	});
-	const publish = (update) => {
-		state = { ...state, ...update };
-		listener?.(update);
-	};
 	return {
 		write(text) {
 			const next = appendTranscript(state.lines, state.lineOpen, text);
@@ -1002,7 +1054,21 @@ export function startTuiUi(options) {
 		status(update) {
 			publish(update);
 		},
+		promptSecret(prompt) {
+			if (secretRequest) throw new Error("a secret prompt is already active");
+			return new Promise((resolve) => {
+				secretRequest = { resolve };
+				publish({ secretPrompt: { id: ++secretSeq, prompt } });
+			});
+		},
 		waitUntilExit: instance.waitUntilExit,
-		unmount: instance.unmount
+		unmount() {
+			if (secretRequest) {
+				const request = secretRequest;
+				secretRequest = null;
+				request.resolve(null);
+			}
+			instance.unmount();
+		}
 	};
 }
