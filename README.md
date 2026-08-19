@@ -1,34 +1,44 @@
 # dsh-cli
 
-`dsh-cli` 是一个运行在 **DeepSeek Harness (DSH)** 之上的终端交互 CLI profile。它不需要启动 Web 服务，也不监听端口，直接在终端里创建和恢复 agent 会话。
+一个轻量、顺手、可恢复会话的 **DeepSeek Harness 终端 TUI profile**。
 
-## 特性
+它让你不用打开 Web UI，也能在终端里和 DSH coding agent 持续对话：有更舒服的输入框、会话恢复、轻量 Markdown 显示、触控板滚动、拖拽复制，以及新手友好的 `/model add` 模型配置。
 
-- 终端内多轮对话，支持会话持久化和恢复。
-- 不依赖 Web UI，适合日常在命令行中使用。
-- 支持常用会话命令、模型选择、历史滚动和管道输入。
-- TTY 模式提供更顺手的输入框、轻量 Markdown 显示和文本复制体验。
+> 适合想把 DSH 当成日常命令行 Agent 使用的人。
 
-## 平台支持
+![dsh-cli 启动界面](screenshots/splash.png)
 
-目前主要在 macOS 的终端环境中使用和验证。Linux / WSL 理论上可以运行，但还没有系统测试；Windows 原生终端暂未验证。
+## 为什么用它
 
-已验证环境：macOS 26.5、macOS Terminal（TTY）与 DSH CLI `0.1.0-rc.6`。本 profile 的依赖和 smoke test 以 `0.1.0-rc.6` 为兼容基线；升级 DSH 后请先运行下方的 smoke 命令确认组合仍可加载。
+- **终端原生**：不启动 Web 服务，不监听端口，直接在终端里使用 DSH。
+- **会话可恢复**：自动恢复当前目录最近会话，也可以 `/new` 或 `/resume <id>`。
+- **输入更顺手**：支持多行输入、光标移动、选择文本和常用快捷键。
+- **长对话可滚动**：触控板/鼠标滚轮浏览历史，停在历史位置时不会被新输出强制拉到底。
+- **拖拽即复制**：对话区拖选文本，松开后自动写入剪贴板。
+- **新手模型配置**：首次启动没配置 DeepSeek API key 时，会提示用 `/model add` 快速添加。
 
-不同终端对键盘、鼠标和剪贴板能力的支持不完全一致，如果遇到交互差异，欢迎反馈具体系统和终端应用。
+## 界面预览
 
-## 安装
+输入 `/` 可以查看会话内命令。常用命令包括 `/model`、`/model add`、`/resume`、`/new`、`/compact`。
 
-前置要求：Node.js 22 或更高版本。先安装 DSH CLI（本仓库已验证 `0.1.0-rc.6`）：
+![Slash 命令菜单](screenshots/commands.png)
+
+## 快速开始
+
+前置要求：
+
+- Node.js 22 或更高版本
+- DSH CLI `0.1.0-rc.6`
+- 一个 DeepSeek API key，或其它 OpenAI 兼容 provider 配置
+
+先安装 DSH CLI：
 
 ```bash
 npm install --global @deepseek-ai/dsh@0.1.0-rc.6
 dsh --version
 ```
 
-第二条命令应输出 `0.1.0-rc.6`。同一 `0.1.0` RC 系列的较新版本也可能可用，但 DSH 的 profile 组合仍在快速演进，升级后应运行 `dsh --profile cli --dump-config` 验证。
-
-本项目是一个 DSH profile。推荐把仓库放在任意开发目录，然后链接到 DSH profile 目录：
+安装本 profile：
 
 ```bash
 git clone https://github.com/khaosnie/dsh-cli.git dsh-cli
@@ -39,50 +49,48 @@ mkdir -p ~/.dsh/profiles
 ln -s "$PWD" ~/.dsh/profiles/cli
 ```
 
-如果你已经有 `~/.dsh/profiles/cli`，请先确认它是否指向旧版本目录，再决定是否替换。
+启动：
 
-如果你把本仓库地址交给其它 agent，它通常可以按上述步骤完成安装；但模型 API key、代理网关地址等凭据仍需要用户自己提供，不应让 agent 从其它项目或聊天记录中猜测。安装完成后，agent 应提醒用户两种模型配置方式：在 TUI 里输入 `/model add` 快速添加 DeepSeek，或按“首次配置模型”的高级方法手动配置其它 provider。
+```bash
+dsh --profile cli
+```
 
-DSH 也支持通过 `dsh plugin --profile <name> add <local-package>` 添加本地 package。当前仓库作为完整 profile 使用时，symlink 方式最直接；如果后续封装成标准 DSH plugin，可以再切换到 plugin 安装方式。
+如果想使用短命令 `dsh cli`，可以在自己的 shell 配置里加：
 
-## 首次配置模型
+```bash
+dsh() {
+  if [ "$1" = "cli" ]; then
+    shift
+    command dsh --profile cli "$@"
+  else
+    command dsh "$@"
+  fi
+}
+```
 
-有两种配置方法：
+## 第一次配置模型
 
-- **推荐新手：在 TUI 里添加 DeepSeek API key。** 最快，只需要一个 key。
-- **高级用户：手动编辑 DSH 设置。** 用于其它 provider、代理网关或自定义模型。
+dsh-cli 提供两种配置方式。
 
-### 方法一：TUI 添加 DeepSeek
+### 最简单：TUI 里添加 DeepSeek
 
-DeepSeek 的最简路径只需要 API key。启动后输入：
+启动后输入：
 
 ```text
 /model add
 ```
 
-按提示粘贴 DeepSeek API key 即可。输入会被遮罩，不会写入对话 transcript；key 会保存到 DSH 的本地 credentials，不会写进项目仓库。默认模型会设置为 `deepseek-official/deepseek-v4-flash`。
+然后粘贴你的 DeepSeek API key。输入会被遮罩，不会写入对话 transcript；key 会保存到 DSH 本地 credentials。
 
-如果启动时检测到当前使用 DeepSeek 默认模型但还没有配置 `DEEPSEEK_API_KEY`，TUI 会在启动区提示运行 `/model add`。
+如果启动时检测到当前使用 DeepSeek 默认模型但还没有配置 `DEEPSEEK_API_KEY`，TUI 会在启动区提示：
 
-也可以用环境变量手动配置：
-
-```bash
-export DEEPSEEK_API_KEY="<your-api-key>"
+```text
+[model setup] No DeepSeek API key detected. Run /model add to add one.
 ```
 
-### 方法二：手动配置其它模型
+### 高级：手动配置其它模型
 
-如需显式切换默认模型，把选择写入 DSH 用户设置（不要把 key 写入此文件）：
-
-```yaml
-# ~/.dsh/settings.yaml
-agent-default-model:
-  provider: deepseek-official
-  model: deepseek-v4-flash
-  reasoningEffort: low # 可选；仅模型支持时设置
-```
-
-其他 provider 也通过同一个 `~/.dsh/settings.yaml` 的 `llm-pi-ai` 区段注册。以下是可加载的 OpenAI 兼容网关示例；`llm-pi-ai` 已由 DSH base 以正确的 service id 挂载，**不要**用 name mismatch 的 `id: llm` patch 覆盖它：
+其它 provider 或代理网关走 DSH 的用户配置。
 
 ```bash
 export OPENAI_API_KEY="<your-api-key>"
@@ -107,40 +115,9 @@ llm-pi-ai:
           maxTokens: 4096
 ```
 
-进入 TUI 后，可以用 `/model` 查看和选择 DSH 当前可用的 provider / model。
+进入 TUI 后可以用 `/model` 查看和选择当前可用模型。
 
-## 使用
-
-```bash
-dsh --profile cli                  # 自动恢复当前目录最后有持久化事件的会话，没有则新建
-dsh --profile cli --new            # 强制新会话
-dsh --profile cli --resume <id>    # 恢复指定会话
-dsh --profile cli --list           # 列出本项目会话
-dsh --profile cli --quiet          # 不显示启动 logo
-```
-
-DSH 官方 CLI 暂时不会把自定义 profile 自动注册成 `dsh <profile>` 子命令。若想使用 `dsh cli`，可以在自己的 shell 配置里加一个 function：
-
-```bash
-dsh() {
-  if [ "$1" = "cli" ]; then
-    shift
-    command dsh --profile cli "$@"
-  else
-    command dsh "$@"
-  fi
-}
-```
-
-管道模式也可用：
-
-```bash
-printf 'say hello in one word\n' | dsh --profile cli --new
-```
-
-管道模式会按输入顺序串行处理每一行。用户取消的 turn 不算失败；任一 provider 或 agent turn 失败时，stdin EOF 后进程以非零退出，适合脚本检测。
-
-## 会话内命令
+## 常用命令
 
 ```text
 /exit                    保存并退出
@@ -155,21 +132,34 @@ printf 'say hello in one word\n' | dsh --profile cli --new
 /compact                 压缩上下文
 ```
 
-以 `/` 开头输入时会显示命令候选。长对话可以滚动查看历史；停留在历史位置时，新输出不会强制把视图拉回底部。
+## 快捷操作
 
-TUI transcript 默认最多保留 2000 行，超出时保留最新内容并在顶部提示累计截断行数；可用 `DSH_TUI_TRANSCRIPT_LINES` 调整上限。
+| 操作 | 说明 |
+| --- | --- |
+| `Enter` | 发送消息 |
+| `Shift+Enter` | 输入换行 |
+| `←` / `→` | 移动输入框光标 |
+| `Home` / `End` | 移动到行首/行尾 |
+| 触控板/鼠标滚轮 | 滚动历史 |
+| 拖拽对话文本 | 松开后自动复制 |
+| `/` | 打开命令候选 |
 
-拖拽选择对话区文本后，松开鼠标会自动写入剪贴板；在 macOS 上会同时使用系统剪贴板能力和终端 OSC 52。
+## 平台支持
 
-## 项目结构
+目前主要在 macOS 的终端环境中使用和验证。Linux / WSL 理论上可以运行，但还没有系统测试；Windows 原生终端暂未验证。
 
-```text
-tui-startup.mjs    解析命令行参数
-tui-runner.mjs     创建/恢复 agent，会话命令和流式输出
-tui-ui.mjs         Ink TUI 输入框、状态栏和对话区
-cordis.patch.yml   DSH profile 挂载配置
-cordis.yml         profile 根配置
-```
+不同终端对键盘、鼠标和剪贴板能力的支持不完全一致，如果遇到交互差异，欢迎反馈具体系统和终端应用。
+
+## 安全边界
+
+本 profile 会加载 DSH code runtime，并允许通过 `DSH_TOOLS_MODE` 等 DSH 配置启用工具能力。
+
+请注意：
+
+- 只在可信工作区运行。
+- 工具能力配置和文件系统 sandbox 是两套不同边界，启用工具前应分别确认。
+- 不要把 API key、访问令牌、私钥或会话日志放进项目工作区。
+- 工具输入和输出会写入 DSH 持久会话；开源反馈和 issue 中不要粘贴敏感日志。
 
 ## 开发
 
@@ -177,23 +167,8 @@ cordis.yml         profile 根配置
 npm run check
 ```
 
-该命令包含语法与纯函数单测，不会启动 agent，也不会改动本机会话。CI 还会在临时 `HOME` 中执行 `dsh --profile cli --help`、`--list`、`--dump-config` 的 profile smoke test，不会请求模型。涉及终端交互的改动，建议在真实终端中手动测试。
+该命令包含语法检查和纯函数单测，不会启动 agent，也不会改动本机会话。
 
-## 安全边界
+## License
 
-本 profile 会加载 DSH code runtime，并允许通过 `DSH_TOOLS_MODE` 等 DSH 配置启用工具能力。请只在可信工作区中运行，不要在不信任的仓库里直接启动。
-
-请注意：
-
-- 工具能力配置和文件系统 sandbox 是两套不同边界，启用工具前应分别确认。
-- 工具输入和输出会写入 DSH 的持久会话；终端默认只显示脱敏参数与完成状态。仅在明确需要排查时设置 `DSH_TUI_VERBOSE_TOOLS=1` 显示完整的、仍会过滤终端控制符的工具内容。
-- 不要把 API Key、访问令牌、私钥或会话日志放进项目工作区。
-- 如果需要工具执行能力，请显式确认 DSH / sandbox 配置符合你的预期。
-- 开源反馈和 issue 中不要粘贴包含凭据、私有路径或敏感会话内容的日志。
-
-## 已知限制
-
-- `/model` 改的是默认模型选择，不会热切换当前已经创建的会话；需要 `/new` 或 `/resume` 后生效。
-- 流式输出阶段的 Markdown 不做完整解析，最终消息稳定后再做轻量显示。
-- 不同系统和终端对键盘、鼠标、剪贴板能力的支持可能不同。
-- 在部分 DSH launcher 版本中，TTY 下执行 `/exit` 可能因 launcher 的 HMR/chokidar watcher 竞态而未自行退出。profile 会在完成会话 flush 并调用 launcher 的退出接口后，等待 3 秒再以相同退出码强制退出；可用 `DSH_TUI_EXIT_TIMEOUT_MS` 调整等待毫秒数，设为 `0` 或负数可禁用兜底。
+[MIT](LICENSE)
