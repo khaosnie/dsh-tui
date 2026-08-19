@@ -3,7 +3,7 @@
   "description": "一个运行在 DeepSeek Harness 之上的终端交互 CLI profile。",
   "private": true,
   "license": "MIT",
-  "author": "Khaos",
+  "author": "Khaos Nie",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/khaosnie/dsh-cli.git"
