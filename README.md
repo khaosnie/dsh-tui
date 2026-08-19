@@ -38,6 +38,43 @@ ln -s "$PWD" ~/.dsh/profiles/tui
 
 DSH 也支持通过 `dsh plugin --profile <name> add <local-package>` 添加本地 package。当前仓库作为完整 profile 使用时，symlink 方式最直接；如果后续封装成标准 DSH plugin，可以再切换到 plugin 安装方式。
 
+## 首次配置模型
+
+`dsh-tui` 不直接保存模型密钥，也不内置某个固定模型。它复用 DSH 已注册的 provider / model 配置。
+
+最简单的方式是先在 shell 中配置 DSH 需要的环境变量：
+
+```bash
+export DEEPSEEK_API_KEY="<your-api-key>"
+# 可选：指定默认模型
+export DSH_MODEL="deepseek-v4-flash"
+```
+
+如果你使用 OpenAI 兼容网关或其他 provider，可以通过 DSH patch 文件声明 provider，并用 `apiKeyEnv` 引用环境变量，避免把密钥写进仓库：
+
+```yaml
+- id: llm
+  name: '@deepseek-ai/dsh-llm-pi-ai'
+  config:
+    providers:
+      openai-compatible:
+        displayName: OpenAI Compatible
+        apiKeyEnv: OPENAI_API_KEY
+        api: openai-completions
+        baseURL: https://example.com/v1
+        models:
+          - id: your-model-id
+            name: Your Model
+```
+
+启动时加载这个本地 patch：
+
+```bash
+dsh --profile tui --patch ./llm.local.yml
+```
+
+进入 TUI 后，可以用 `/model` 查看和选择 DSH 当前可用的 provider / model。
+
 ## 使用
 
 ```bash
