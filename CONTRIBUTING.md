@@ -9,6 +9,8 @@ npm ci
 npm run check
 ```
 
+CI 也会在临时 `HOME` 中把仓库链接为 `tui` profile，并运行 `dsh --profile tui --help`、`--list` 和 `--dump-config`。这些 smoke test 只验证 profile 组合与配置，不请求模型或消耗 token。
+
 如果要做交互测试，可以把仓库链接为本地 DSH profile：
 
 ```bash

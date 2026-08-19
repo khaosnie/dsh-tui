@@ -8,6 +8,24 @@ const BRAND = "#4176e6";
 const BRAND_SOFT = "#679efe";
 const USER_BG = "#34343f";
 const CARET_ANCHOR = "\u2800";
+const TRANSCRIPT_LINE_LIMIT = Number.parseInt(process.env.DSH_TUI_TRANSCRIPT_LINES ?? "2000", 10) || 2000;
+
+export function appendTranscript(lines, lineOpen, text, lineLimit = TRANSCRIPT_LINE_LIMIT) {
+	const raw = String(text);
+	const parts = raw.split("\n");
+	const next = [...lines];
+	if (next.length === 0 || !lineOpen) next.push("");
+	next[next.length - 1] += parts.shift() ?? "";
+	for (const part of parts) next.push(part);
+	const nextLineOpen = !raw.endsWith("\n");
+	if (!nextLineOpen && next.at(-1) === "") next.pop();
+	const dropped = Math.max(0, next.length - lineLimit);
+	return {
+		lines: dropped > 0 ? next.slice(dropped) : next,
+		lineOpen: nextLineOpen,
+		dropped
+	};
+}
 
 function contextLabel(state) {
 	if (state.contextUsage && state.contextWindow) return `Context ${state.contextUsage} / ${state.contextWindow}`;
@@ -171,13 +189,18 @@ function hitTestComposer(rows, input, rowIndex, column) {
 }
 
 function copyText(text) {
-	if (!text) return;
+	const plainText = stripAnsi(text);
+	if (!plainText) return;
 	if (process.stdout.isTTY) {
-		process.stdout.write(`\x1b]52;c;${Buffer.from(text, "utf8").toString("base64")}\x07`);
+		process.stdout.write(`\x1b]52;c;${Buffer.from(plainText, "utf8").toString("base64")}\x07`);
 	}
 	if (process.platform === "darwin") {
-		spawnSync("pbcopy", { input: text });
+		spawnSync("pbcopy", { input: plainText });
 	}
+}
+
+function stripAnsi(text) {
+	return String(text).replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
 }
 
 function displayText(line) {
@@ -233,7 +256,7 @@ function pushScreenRows(rows, keyPrefix, kind, text, columns, extra = {}) {
 			key: `${keyPrefix}-${rowIndex}`,
 			kind,
 			text: rowText,
-			copyText: rowText,
+			copyText: stripAnsi(rowText),
 			...extra
 		});
 	}
@@ -341,7 +364,7 @@ function selectedText(rows, selection) {
 		const end = row === bounds.end.row ? offsetAtCell(text, bounds.end.col) : text.length;
 		out.push(text.slice(Math.min(start, end), Math.max(start, end)));
 	}
-	return out.join("\n").trimEnd();
+	return stripAnsi(out.join("\n").trimEnd());
 }
 
 function selectedCellRange(rowIndex, text, selection) {
@@ -511,9 +534,10 @@ function App({ api, commands, initialState }) {
 		{ kind: "brand", bold: true, text: `DeepSeek Harness${state.project ? `  ·  ${state.project}` : ""}` },
 		...(state.banner ? state.banner.trim().split("\n").map((text) => ({ kind: "brand", text })) : []),
 		{ kind: "hint", text: "Type / for commands  ·  Shift+Enter newline  ·  Touchpad scroll  ·  Drag to copy text" },
+		...(state.truncatedLines ? [{ kind: "hint", text: `… 已截断 ${state.truncatedLines} 行 …` }] : []),
 		{ kind: "blank" },
 		...transcriptEntries(transcript)
-	], [state.project, state.banner, transcript]);
+	], [state.project, state.banner, state.truncatedLines, transcript]);
 	const documentColumns = Math.max(1, colCount - 1);
 	const rowsDoc = useMemo(() => documentRows(document, documentColumns), [document, documentColumns]);
 	const totalRows = rowsDoc.length;
@@ -965,18 +989,15 @@ export function startTuiUi(options) {
 	};
 	return {
 		write(text) {
-			const raw = String(text);
-			const parts = raw.split("\n");
-			const lines = [...state.lines];
-			if (lines.length === 0 || !state.lineOpen) lines.push("");
-			lines[lines.length - 1] += parts.shift() ?? "";
-			for (const part of parts) lines.push(part);
-			const lineOpen = !raw.endsWith("\n");
-			if (!lineOpen && lines.at(-1) === "") lines.pop();
-			publish({ lines, lineOpen });
+			const next = appendTranscript(state.lines, state.lineOpen, text);
+			publish({
+				lines: next.lines,
+				lineOpen: next.lineOpen,
+				truncatedLines: (state.truncatedLines ?? 0) + next.dropped
+			});
 		},
 		clear() {
-			publish({ lines: [], lineOpen: false });
+			publish({ lines: [], lineOpen: false, truncatedLines: 0 });
 		},
 		status(update) {
 			publish(update);
