@@ -6,6 +6,9 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -24,3 +27,12 @@ jobs:
 
       - name: Run checks
         run: npm run check
+
+      - name: Smoke-test profile composition
+        run: |
+          smoke_home="$(mktemp -d)"
+          mkdir -p "$smoke_home/.dsh/profiles"
+          ln -s "$GITHUB_WORKSPACE" "$smoke_home/.dsh/profiles/tui"
+          timeout 30s env HOME="$smoke_home" npx --no-install dsh --profile tui --help
+          timeout 30s env HOME="$smoke_home" npx --no-install dsh --profile tui --list
+          timeout 30s env HOME="$smoke_home" npx --no-install dsh --profile tui --dump-config
