@@ -23,7 +23,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "check": "node --check tui-startup.mjs && node --check tui-runner.mjs && node --check tui-ui.mjs"
+		"check": "node --check tui-startup.mjs && node --check tui-runner.mjs && node --check tui-ui.mjs && node --check tui-safety.mjs && node --test test/*.test.mjs"
   },
   "dependencies": {
     "@deepseek-ai/dsh": "^0.1.0-rc.6",

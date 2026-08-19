@@ -4,6 +4,7 @@ import { installModelSelection } from "@deepseek-ai/dsh-agent";
 import { createUserMessage, ReasoningEffortId } from "@deepseek-ai/dsh-llm";
 import { SessionId } from "@deepseek-ai/dsh-session";
 import { startTuiUi } from "./tui-ui.mjs";
+import { sanitizeDisplayValue, sanitizeTerminalText, summarizeToolArguments } from "./tui-safety.mjs";
 
 /**
  * @deepseek-ai/dsh-tui-runner — interactive terminal agent driver.
@@ -71,6 +72,12 @@ const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY);
 const colorEnabled =
 	Boolean(process.stdout.isTTY) && !process.env.NO_COLOR && process.env.TERM !== "dumb";
 
+export function parseExitTimeoutMs(value = process.env.DSH_TUI_EXIT_TIMEOUT_MS) {
+	const parsed = Number.parseInt(value ?? "3000", 10);
+	if (!Number.isFinite(parsed)) return 3000;
+	return parsed > 0 ? parsed : 0;
+}
+
 const ANSI = {
 	dim: "2",
 	red: "31",
@@ -79,10 +86,6 @@ const ANSI = {
 	cyan: "36",
 	bold: "1"
 };
-
-function stripAnsi(text) {
-	return String(text).replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
-}
 
 function style(kind, text) {
 	if (!colorEnabled) return text;
@@ -133,27 +136,12 @@ function colorizeMarkdown(text) {
 		.join("\n");
 }
 
-function toolArgSummary(raw) {
-	if (!raw) return "";
-	try {
-		const parsed = JSON.parse(raw);
-		if (parsed && typeof parsed === "object") {
-			const bits = Object.entries(parsed).slice(0, 3).map(([k, v]) => {
-				const val = typeof v === "string" ? v : JSON.stringify(v);
-				return `${k}=${trunc(val, 40)}`;
-			});
-			return bits.join(" ");
-		}
-	} catch {}
-	return trunc(raw, 80);
-}
-
 function toolResultText(ev) {
 	const blocks = ev.data?.message?.content?.[0]?.content;
 	if (!Array.isArray(blocks)) return "";
 	return blocks
 		.filter((block) => block.type === "text")
-		.map((block) => block.text)
+		.map((block) => sanitizeTerminalText(block.text))
 		.join("");
 }
 
@@ -173,11 +161,11 @@ async function loadModelCatalog(llm) {
 	return settled.flatMap((result) => {
 		if (result.status !== "fulfilled") return [];
 		return result.value.models.map((model) => ({
-			provider: result.value.provider.id,
-			providerName: result.value.provider.name,
-			id: model.id,
-			name: model.name,
-			description: model.description
+			provider: sanitizeDisplayValue(result.value.provider.id),
+			providerName: sanitizeDisplayValue(result.value.provider.name),
+			id: sanitizeDisplayValue(model.id),
+			name: sanitizeDisplayValue(model.name),
+			description: sanitizeDisplayValue(model.description)
 		}));
 	});
 }
@@ -216,16 +204,23 @@ function createCursorGuard(stdout, blocked) {
 async function projectSessions(persistence, cwd) {
 	if (!persistence?.list) return [];
 	const headers = await persistence.list();
-	return headers
-		.filter((header) => header.cwd === cwd && header.origin !== "subagent")
-		.sort((a, b) => b.createdAt - a.createdAt);
+	const projectHeaders = headers.filter((header) => header.cwd === cwd && header.origin !== "subagent");
+	const withActivity = await Promise.all(projectHeaders.map(async (header) => {
+		try {
+			const inspection = await persistence.inspect(header.id);
+			return { ...header, activityAt: inspection.events.at(-1)?.time ?? header.createdAt };
+		} catch {
+			return { ...header, activityAt: header.createdAt };
+		}
+	}));
+	return withActivity.sort((a, b) => b.activityAt - a.activityAt);
 }
 
 async function sessionTitle(persistence, header) {
 	if (!persistence?.inspect) return null;
 	try {
 		const inspection = await persistence.inspect(header.id);
-		return titleFromEvents(inspection.events);
+		return sanitizeDisplayValue(titleFromEvents(inspection.events));
 	} catch {
 		return null;
 	}
@@ -243,7 +238,7 @@ async function printSessionList(persistence, cwd, write, options = {}) {
 		const header = rows[i];
 		let title = "";
 		if (withTitles && i < 20) title = (await sessionTitle(persistence, header)) ?? "";
-		const bits = [header.id, relativeTime(header.createdAt)];
+		const bits = [sanitizeDisplayValue(header.id), relativeTime(header.activityAt ?? header.createdAt)];
 		if (title) bits.push(title);
 		write(`${bits.join("\t")}\n`);
 	}
@@ -301,11 +296,13 @@ async function repl(ctx, services, io) {
 	let spinnerOn = false;
 	let modelCatalog = [];
 	let ui = null;
+	let turnFailed = false;
+	const verboseTools = process.env.DSH_TUI_VERBOSE_TOOLS === "1";
 
 	const writeOut = (text) => {
 		if (!text) return;
 		if (ui) {
-			ui.write(stripAnsi(text));
+			ui.write(text);
 			return;
 		}
 		const draft = interactive && rl && rl.line.length > 0;
@@ -435,14 +432,14 @@ async function repl(ctx, services, io) {
 			} catch {}
 			ui.status({
 				sessionId: current.agent.id,
-				provider: current.agent.options.provider,
-				model: current.agent.options.model,
+				provider: sanitizeDisplayValue(current.agent.options.provider),
+				model: sanitizeDisplayValue(current.agent.options.model),
 				contextWindow: contextWindow ? formatTokens(contextWindow) : undefined,
 				contextUsage
 			});
 		}
 		if (interactive) {
-			say(style("dim", resumeId ? `[resumed ${resumeId}]` : `[new session ${current.agent.id}]`));
+			say(style("dim", resumeId ? `[resumed ${sanitizeDisplayValue(resumeId)}]` : `[new session ${sanitizeDisplayValue(current.agent.id)}]`));
 		}
 		await current.agent.whenIdle();
 	};
@@ -464,6 +461,11 @@ async function repl(ctx, services, io) {
 			if (current) await current.handle.dispose();
 		} catch {}
 		io.exit(code);
+		const exitTimeoutMs = parseExitTimeoutMs();
+		if (exitTimeoutMs > 0) {
+			const forceExitTimer = setTimeout(() => process.exit(code), exitTimeoutMs);
+			forceExitTimer.unref();
+		}
 	};
 
 	const consumeEvent = (state, ev) => {
@@ -471,11 +473,11 @@ async function repl(ctx, services, io) {
 			const content = ev.data.message.content;
 			const reasoning = content
 				.filter((block) => block.type === "reasoning")
-				.map((block) => block.text)
+				.map((block) => sanitizeTerminalText(block.text))
 				.join("");
 			const text = content
 				.filter((block) => block.type === "text")
-				.map((block) => block.text)
+				.map((block) => sanitizeTerminalText(block.text))
 				.join("");
 			if (text === state.printed && reasoning === state.printedReasoning) return;
 			stopSpinner();
@@ -521,9 +523,10 @@ async function repl(ctx, services, io) {
 				writeOut("\n");
 				state.assistantStarted = false;
 			}
-			state.tools.set(ev.data.callId, { name: ev.data.name, started: Date.now() });
-			const args = toolArgSummary(ev.data.arguments);
-			say(style("dim", args ? `[tool] ${ev.data.name} · ${args}` : `[tool] ${ev.data.name}`));
+			const name = sanitizeDisplayValue(ev.data.name);
+			state.tools.set(ev.data.callId, { name, started: Date.now() });
+			const args = summarizeToolArguments(ev.data.arguments, { verbose: verboseTools });
+			say(style("dim", args ? `[tool] ${name} · ${args}` : `[tool] ${name}`));
 			state.sawOutput = true;
 			return;
 		}
@@ -538,14 +541,15 @@ async function repl(ctx, services, io) {
 			const info = ev.data?.error;
 			const failed = info !== undefined
 				|| ev.data?.message?.content?.[0]?.isError === true;
-			const detail = info?.code ?? info?.name ?? info?.message
-				?? (typeof info === "string" ? info : null)
-				?? "error";
+			const detail = sanitizeDisplayValue(verboseTools
+				? info?.code ?? info?.name ?? info?.message ?? (typeof info === "string" ? info : null) ?? "error"
+				: info?.code ?? info?.name ?? "error");
 			if (failed) {
 				say(style("red", `[tool error] ${name}${elapsed} · ${detail}`));
 			} else {
-				const preview = trunc(toolResultText(ev), 80);
-				say(style("green", preview ? `[tool] ${name}${elapsed} · ${preview}` : `[tool] ${name}${elapsed}`));
+				const result = toolResultText(ev);
+				const detail = verboseTools && result ? ` · ${result}` : " · completed (set DSH_TUI_VERBOSE_TOOLS=1 to show output)";
+				say(style("green", `[tool] ${name}${elapsed}${detail}`));
 			}
 			state.sawOutput = true;
 			return;
@@ -562,11 +566,12 @@ async function repl(ctx, services, io) {
 
 	const runTurn = async (text) => {
 		if (!current) return;
-		if (interactive) say(`You › ${text}`);
+		const turnCurrent = current;
+		if (interactive) say(`You › ${sanitizeTerminalText(text)}`);
 		setBusy(true);
 		startSpinner();
-		const firstSeq = current.agent.session.seq;
-		current.agent.followup(
+		const firstSeq = turnCurrent.agent.session.seq;
+		turnCurrent.agent.followup(
 			createUserMessage({
 				content: [{ type: "text", text }],
 				source: { kind: "user" }
@@ -583,7 +588,7 @@ async function repl(ctx, services, io) {
 			tools: new Map()
 		};
 		try {
-			await streamTurn(current.agent, firstSeq, {
+			await streamTurn(turnCurrent.agent, firstSeq, {
 				consume: (ev) => consumeEvent(state, ev)
 			});
 		} finally {
@@ -593,18 +598,19 @@ async function repl(ctx, services, io) {
 		if (state.printed || state.sawOutput) writeOut("\n");
 		if (state.turnError && !state.cancelled) {
 			const { code, message } = state.turnError;
-			say(style("red", `turn error${code ? ` ${code}` : ""}: ${message ?? ""}`.trim()));
+			turnFailed = true;
+			say(style("red", `turn error${code ? ` ${sanitizeDisplayValue(code)}` : ""}: ${sanitizeDisplayValue(message)}`.trim()));
 		}
-		if (interactive && tokenMeter && current) {
+		if (interactive && tokenMeter) {
 			try {
-				const measured = tokenMeter.measure(current.agent.session);
+				const measured = tokenMeter.measure(turnCurrent.agent.session);
 				if (measured.totalTokens > 0) {
 					if (ui) ui.status({ contextUsage: formatTokens(measured.totalTokens) });
 					else say(style("dim", `[tokens ${measured.totalTokens}]`));
 				}
 			} catch {}
 		}
-		await sessions.flush(current.agent.session);
+		await sessions.flush(turnCurrent.agent.session);
 	};
 
 	const pickModel = async () => {
@@ -615,8 +621,8 @@ async function repl(ctx, services, io) {
 			return;
 		}
 		say(
-			`current: ${currentSelection.provider}/${currentSelection.model}${
-				currentSelection.reasoningEffort ? ` (effort ${currentSelection.reasoningEffort})` : ""
+			`current: ${sanitizeDisplayValue(currentSelection.provider)}/${sanitizeDisplayValue(currentSelection.model)}${
+				currentSelection.reasoningEffort ? ` (effort ${sanitizeDisplayValue(currentSelection.reasoningEffort)})` : ""
 			}`
 		);
 		for (let i = 0; i < modelCatalog.length; i++) {
@@ -628,7 +634,7 @@ async function repl(ctx, services, io) {
 			const details = entry.description ? ` — ${trunc(entry.description, 72)}` : "";
 			say(`${String(i + 1).padStart(2, " ")}. ${modelSpec(entry)}${details}${active}`);
 		}
-		if (!rl) return;
+		if (!interactive || !rl) return;
 		const answer = await new Promise((resolve) => {
 			rl.question("select model number (Enter to cancel): ", resolve);
 		});
@@ -665,7 +671,7 @@ async function repl(ctx, services, io) {
 					: null;
 				const efforts = resolved?.reasoning?.efforts ?? [];
 				if (efforts.length === 0) {
-					say(style("red", `"${provider}/${model}" does not support reasoning effort`));
+					say(style("red", `"${sanitizeDisplayValue(provider)}/${sanitizeDisplayValue(model)}" does not support reasoning effort`));
 					return;
 				}
 				if (!efforts.some((effort) => effort.id === effortArg)) {
@@ -681,7 +687,7 @@ async function repl(ctx, services, io) {
 				}
 				next.reasoningEffort = ReasoningEffortId(effortArg);
 			} catch (error) {
-				say(style("red", `could not resolve model capability: ${error.message}`));
+				say(style("red", `could not resolve model capability: ${sanitizeDisplayValue(error.message)}`));
 				return;
 			}
 		} else if (!switchingModel && sel.reasoningEffort) {
@@ -692,11 +698,11 @@ async function repl(ctx, services, io) {
 			say(
 				style(
 					"dim",
-					`[model set to ${provider}/${model}${next.reasoningEffort ? ` effort ${next.reasoningEffort}` : ""} — applies after /new or /resume]`
+					`[model set to ${sanitizeDisplayValue(provider)}/${sanitizeDisplayValue(model)}${next.reasoningEffort ? ` effort ${sanitizeDisplayValue(next.reasoningEffort)}` : ""} — applies after /new or /resume]`
 				)
 			);
 		} catch (error) {
-			say(style("red", `could not switch model: ${error.message}`));
+			say(style("red", `could not switch model: ${sanitizeDisplayValue(error.message)}`));
 		}
 	};
 
@@ -724,9 +730,9 @@ async function repl(ctx, services, io) {
 					commit: "Compaction did not finish cleanly; some session history may have changed.",
 					persistence: "Compaction finished, but the session could not be saved."
 				};
-				say(style("red", messages[error.code] ?? error.message));
+				say(style("red", sanitizeDisplayValue(messages[error.code] ?? error.message)));
 			} else {
-				say(style("red", error.message));
+				say(style("red", sanitizeDisplayValue(error.message)));
 			}
 		}
 	};
@@ -771,7 +777,7 @@ async function repl(ctx, services, io) {
 					try {
 						await spawn(null);
 					} catch (error) {
-						say(style("red", `new session failed: ${error.message}`));
+						say(style("red", `new session failed: ${sanitizeDisplayValue(error.message)}`));
 					}
 					return;
 				case "/resume":
@@ -787,14 +793,14 @@ async function repl(ctx, services, io) {
 					try {
 						await spawn(arg);
 					} catch (error) {
-						say(style("red", `resume failed: ${error.message}`));
+						say(style("red", `resume failed: ${sanitizeDisplayValue(error.message)}`));
 					}
 					return;
 				case "/list":
 					await printSessionList(persistence, cwd, (t) => writeOut(t), { withTitles: true });
 					return;
 				default:
-					say(`unknown command: ${cmd} (try /help)`);
+					say(`unknown command: ${sanitizeDisplayValue(cmd)} (try /help)`);
 					return;
 			}
 		}
@@ -822,7 +828,8 @@ async function repl(ctx, services, io) {
 				} catch (error) {
 					restoreTerminal();
 					setBusy(false);
-					say(style("red", error.message));
+					turnFailed = true;
+					say(style("red", sanitizeDisplayValue(error.message)));
 				}
 				if (exiting) break;
 			}
@@ -835,9 +842,7 @@ async function repl(ctx, services, io) {
 			return;
 		}
 		if (stdinClosed) {
-			await flushAndExit(0);
-		} else if (interactive) {
-			rl.prompt();
+			await flushAndExit(turnFailed ? 1 : 0);
 		}
 	};
 
@@ -878,13 +883,7 @@ async function repl(ctx, services, io) {
 				banner: startup.quiet || process.env.DSH_NO_BANNER ? "" : BANNER,
 				turn: "idle"
 			},
-			onSubmit: async (line) => {
-				try {
-					await handleLine(line);
-				} catch (error) {
-					say(style("red", error.message));
-				}
-			},
+			onSubmit: enqueue,
 			onCancel: () => {
 				if (current?.agent.status === "running") {
 					current.agent.cancel({ kind: "user" }, { keepInbox: true });
@@ -907,7 +906,7 @@ async function repl(ctx, services, io) {
 		try {
 			await spawn(initialResumeId);
 		} catch (error) {
-			say(style("yellow", `[latest session unavailable, starting new one: ${error.message}]`));
+			say(style("yellow", `[latest session unavailable, starting new one: ${sanitizeDisplayValue(error.message)}]`));
 			await spawn(null);
 		}
 	} else {
@@ -915,17 +914,20 @@ async function repl(ctx, services, io) {
 	}
 
 	ready = true;
+	if (queue.length > 0 && !draining) {
+		if (interactive) void drain();
+		else await drain();
+	}
 	if (interactive && ui) {
 		await ui.waitUntilExit();
 		if (!exiting) await flushAndExit(0);
 		return;
 	}
-	if (stdinClosed) await flushAndExit(0);
-	else if (queue.length > 0 && !draining) drain();
+	if (stdinClosed) await flushAndExit(turnFailed ? 1 : 0);
 }
 
 function fail(io, error) {
-	io.stderr.write(`dsh: ${error instanceof Error ? error.message : String(error)}\n`);
+	io.stderr.write(`dsh: ${sanitizeDisplayValue(error instanceof Error ? error.message : error)}\n`);
 	io.exit(1);
 }
 
