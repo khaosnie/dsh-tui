@@ -1,8 +1,17 @@
 {
-  "name": "dsh-profile-tui",
+  "name": "dsh-tui",
   "description": "一个运行在 DeepSeek Harness 之上的终端交互 profile。",
   "private": true,
   "license": "MIT",
+  "author": "Khaos",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/khaosnie/dsh-tui.git"
+  },
+  "homepage": "https://github.com/khaosnie/dsh-tui#readme",
+  "bugs": {
+    "url": "https://github.com/khaosnie/dsh-tui/issues"
+  },
   "keywords": [
     "deepseek",
     "dsh",

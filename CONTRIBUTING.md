@@ -1,11 +1,11 @@
 # 贡献指南
 
-感谢你帮助改进 `dsh-profile-tui`。
+感谢你帮助改进 `dsh-tui`。
 
 ## 本地开发
 
 ```bash
-npm install --legacy-peer-deps
+npm ci
 npm run check
 ```
 

@@ -2,3 +2,11 @@ node_modules/
 .DS_Store
 npm-debug.log*
 pnpm-debug.log*
+.env
+.env.*
+!.env.example
+.dsh/
+dsh-sessions/
+sessions/
+local/
+*.local

@@ -2,9 +2,12 @@
 
 ## 报告安全问题
 
-如果发现安全问题，请优先通过私密渠道联系维护者，不要在公开 issue 中直接披露利用细节。
+如果发现安全问题，请不要在公开 issue 中直接披露利用细节。推荐使用以下渠道：
 
-如果仓库已发布在 GitHub，建议使用 GitHub 的私密漏洞报告功能。
+- GitHub Security Advisories：在仓库的 **Security** 页面中选择 **Report a vulnerability**。
+- 如果私密漏洞报告尚未启用，请先在 issue 中只说明“希望私密报告安全问题”，不要包含复现细节或敏感信息。
+
+发布到 GitHub 后，维护者应在仓库设置中启用 **Private vulnerability reporting**，让上面的私密报告入口实际可用。
 
 ## 本地敏感数据
 
