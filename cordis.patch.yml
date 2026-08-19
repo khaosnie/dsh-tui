@@ -1,7 +1,7 @@
-# Interactive terminal (TUI) profile: a persistent REPL over dsh-base.
-# No Host, HTTP server, or Web runtime — the agent runs entirely in this
-# process, reading stdin and writing stdout. Sessions persist under the same
-# JSONL store the Web surface uses, so `--resume` picks up any session.
+# 终端交互（TUI）profile：基于 dsh-base 的持久化 REPL。
+# 不启动 Host、HTTP 服务或 Web runtime；agent 直接在当前进程内运行，
+# 读取 stdin、写入 stdout。会话复用 DSH 的 JSONL 存储，因此可通过
+# `--resume` 恢复历史会话。
 
 - id: system-prompt
   config:
@@ -9,27 +9,26 @@
       You are a coding agent powered by the {{model}} model. Your working directory is {{cwd}}.
       The user talks to you through an interactive terminal; answer directly and concisely.
 
-# The shared module-reload HMR row stays off; a terminal REPL does not need
-# live patch reloads and they would fight the readline loop.
+# 终端 REPL 不需要模块热重载；开启后还可能干扰 readline / TTY 状态。
 - id: hmr
   disabled: true
 
 - id: tools
   config:
-    # Keep the same temporary process-wide Code Mode opt-in as the Web surface.
+    # 与 Web 侧保持一致：通过进程环境变量临时启用 Code Mode。
     mode: !!js process.env.DSH_TOOLS_MODE
 
 - insert:
-    # Code Mode is a core execution capability, not a Web component.
+    # Code Mode 是核心执行能力，不依赖 Web 组件。
     - id: code-runtime
       name: '@deepseek-ai/dsh-code-runtime-worker-thread'
 
-    # Parses `--new/--resume/--list` and publishes the tuiStartup service.
+    # 解析 `--new/--resume/--list`，并发布 tuiStartup 服务。
     - id: tui-startup
       name: ./tui-startup.mjs
       inject: [cmdlineArgs]
 
-    # The interactive driver: creates/resumes one Agent, runs the REPL.
+    # 交互驱动：创建/恢复 Agent，并运行 REPL。
     - id: tui-runner
       name: ./tui-runner.mjs
       inject: [tuiStartup, agentDefaultModel, agents, llm, sessions]

@@ -1,5 +1,6 @@
-import React, { memo, useEffect, useMemo, useRef, useState } from "react";
-import { Box, Text, render, useApp, useCursor, useInput, useWindowSize } from "ink";
+import { spawnSync } from "node:child_process";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { Box, Text, measureElement, render, useApp, useCursor, useInput, useWindowSize } from "ink";
 import stringWidth from "string-width";
 
 const h = React.createElement;
@@ -16,15 +17,6 @@ function contextLabel(state) {
 
 function rule(columns) {
 	return "─".repeat(Math.max(24, columns - 2));
-}
-
-function wrappedRows(text, columns) {
-	const width = Math.max(1, columns);
-	let rows = 0;
-	for (const line of String(text).split("\n")) {
-		rows += Math.max(1, Math.ceil(stringWidth(line) / width));
-	}
-	return Math.max(1, rows);
 }
 
 function wrapLine(text, width) {
@@ -179,8 +171,13 @@ function hitTestComposer(rows, input, rowIndex, column) {
 }
 
 function copyText(text) {
-	if (!text || !process.stdout.isTTY) return;
-	process.stdout.write(`\x1b]52;c;${Buffer.from(text, "utf8").toString("base64")}\x07`);
+	if (!text) return;
+	if (process.stdout.isTTY) {
+		process.stdout.write(`\x1b]52;c;${Buffer.from(text, "utf8").toString("base64")}\x07`);
+	}
+	if (process.platform === "darwin") {
+		spawnSync("pbcopy", { input: text });
+	}
 }
 
 function displayText(line) {
@@ -188,18 +185,6 @@ function displayText(line) {
 	if (line.startsWith("DeepSeek ›")) return line.slice("DeepSeek › ".length);
 	if (line.startsWith("Think ›")) return line.slice("Think › ".length);
 	return line;
-}
-
-function entryRowCount(entry, columns) {
-	if (entry.kind === "blank") return 1;
-	if (entry.kind === "transcript") {
-		const line = entry.line;
-		if (line.startsWith("You ›")) {
-			return wrappedRows(displayText(line), Math.max(1, columns - 2)) + 2;
-		}
-		return wrappedRows(displayText(line), columns);
-	}
-	return wrappedRows(entry.text ?? "", columns);
 }
 
 function transcriptEntries(lines) {
@@ -213,97 +198,196 @@ function transcriptEntries(lines) {
 	});
 }
 
-function sliceFromBottom(entries, heights, offsetFromBottom, viewportRows) {
-	const total = heights.reduce((sum, value) => sum + value, 0);
-	const endRow = Math.max(0, total - offsetFromBottom);
-	const startRow = Math.max(0, endRow - viewportRows);
-	let acc = 0;
-	let start = 0;
-	let end = entries.length;
-	for (let i = 0; i < entries.length; i++) {
-		const next = acc + heights[i];
-		if (next <= startRow) start = i + 1;
-		if (acc >= endRow) {
-			end = i;
-			break;
-		}
-		acc = next;
-	}
-	return { entries: entries.slice(start, end), start, end, startRow, endRow, total };
+function plainInlineMarkdown(text) {
+	return text.replace(/`([^`]+)`|\*\*([^*]+)\*\*/g, (_, code, bold) => code ?? bold ?? "");
 }
 
-function inlineMarkdown(text, keyPrefix) {
-	const nodes = [];
-	const pattern = /(`[^`]+`|\*\*[^*]+\*\*)/g;
-	let last = 0;
-	let index = 0;
-	for (const match of text.matchAll(pattern)) {
-		if (match.index > last) nodes.push(text.slice(last, match.index));
-		const token = match[0];
-		if (token.startsWith("`")) {
-			nodes.push(h(Text, { key: `${keyPrefix}-code-${index++}`, color: "cyan" }, token.slice(1, -1)));
-		} else {
-			nodes.push(h(Text, { key: `${keyPrefix}-bold-${index++}`, bold: true }, token.slice(2, -2)));
-		}
-		last = match.index + token.length;
-	}
-	if (last < text.length) nodes.push(text.slice(last));
-	return nodes.length ? nodes : [text];
-}
-
-function MarkdownLine({ text, code, fence, baseKey, color, dimColor }) {
-	if (fence) return h(Text, { color: "#7f7f7f", dimColor: true }, text);
-	if (code) return h(Text, { color: "cyan" }, text);
+function markdownDisplayText(text, code, fence) {
+	if (fence || code) return text;
 	const heading = /^(#{1,6})\s+(.*)$/.exec(text);
-	if (heading) {
-		return h(Text, { color: BRAND, bold: true }, ...inlineMarkdown(heading[2], `${baseKey}-h`));
-	}
-	if (/^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(text)) {
-		return h(Text, { dimColor: true }, text);
-	}
+	if (heading) return plainInlineMarkdown(heading[2]);
 	const quote = /^>\s?(.*)$/.exec(text);
-	if (quote) {
-		return h(Text, { dimColor: true }, "│ ", ...inlineMarkdown(quote[1], `${baseKey}-q`));
-	}
-	return h(Text, { color, dimColor }, ...inlineMarkdown(text, baseKey));
+	if (quote) return `│ ${plainInlineMarkdown(quote[1])}`;
+	return plainInlineMarkdown(text);
 }
 
-const DocumentEntry = memo(function DocumentEntry({ entry, index }) {
-	if (entry.kind === "transcript") {
+function screenRowStyle(kind, text, code, fence) {
+	if (kind === "brand") return { color: BRAND, bold: true };
+	if (kind === "hint" || kind === "meta") return { dimColor: true };
+	if (kind === "user") return { color: "#f2f2f2", backgroundColor: USER_BG };
+	if (kind === "tool-error") return { color: "red" };
+	if (kind === "tool") return { color: "green" };
+	if (kind === "think") return { color: "#a6a6a6", dimColor: true };
+	if (fence) return { color: "#7f7f7f", dimColor: true };
+	if (code) return { color: "cyan" };
+	if (/^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(text)) return { dimColor: true };
+	if (/^(#{1,6})\s+/.test(text)) return { color: BRAND, bold: true };
+	if (/^>\s?/.test(text)) return { dimColor: true };
+	return {};
+}
+
+function pushScreenRows(rows, keyPrefix, kind, text, columns, extra = {}) {
+	const width = Math.max(1, columns);
+	for (const [rowIndex, rowText] of wrapLine(text, width).entries()) {
+		rows.push({
+			key: `${keyPrefix}-${rowIndex}`,
+			kind,
+			text: rowText,
+			copyText: rowText,
+			...extra
+		});
+	}
+}
+
+function documentRows(entries, columns) {
+	const rows = [];
+	const width = Math.max(1, columns);
+	for (const [index, entry] of entries.entries()) {
+		if (entry.kind === "blank") {
+			rows.push({ key: `${index}-blank`, kind: "blank", text: " " });
+			continue;
+		}
+		if (entry.kind === "brand" || entry.kind === "hint") {
+			const style = screenRowStyle(entry.kind, entry.text);
+			pushScreenRows(rows, String(index), entry.kind, entry.text, width, {
+				...style,
+				bold: entry.bold ?? style.bold
+			});
+			continue;
+		}
+		if (entry.kind !== "transcript") continue;
 		const line = entry.line;
-		const key = `${index}-${line}`;
 		if (line.startsWith("You ›")) {
-			return h(
-				Box,
-				{ key, backgroundColor: USER_BG, paddingX: 1, paddingY: 1 },
-				h(Text, { color: "#f2f2f2" }, displayText(line))
-			);
+			rows.push({
+				key: `${index}-user-top`,
+				kind: "user",
+				text: " ",
+				copyText: "",
+				...screenRowStyle("user", " ")
+			});
+			for (const [rowIndex, text] of wrapLine(displayText(line), Math.max(1, width - 1)).entries()) {
+				const rowText = ` ${text}`;
+				rows.push({
+					key: `${index}-user-${rowIndex}`,
+					kind: "user",
+					text: rowText,
+					copyText: rowText,
+					...screenRowStyle("user", rowText)
+				});
+			}
+			rows.push({
+				key: `${index}-user-bottom`,
+				kind: "user",
+				text: " ",
+				copyText: "",
+				...screenRowStyle("user", " ")
+			});
+			continue;
 		}
-		if (line.startsWith("DeepSeek ›")) {
-			return h(MarkdownLine, { key, baseKey: key, text: displayText(line), code: entry.code, fence: entry.fence });
-		}
-		if (line.startsWith("Think ›")) {
-			return h(MarkdownLine, { key, baseKey: key, text: displayText(line), color: "#a6a6a6", dimColor: true });
-		}
-		if (line.startsWith("[tool error]")) {
-			return h(Text, { key, color: "red" }, line);
-		}
-		if (line.startsWith("[tool]")) {
-			return h(Text, { key, color: "green" }, line);
-		}
-		if (line.startsWith("[new ") || line.startsWith("[resumed ")) {
-			return h(Text, { key, dimColor: true }, line);
-		}
-		return h(MarkdownLine, { key, baseKey: key, text: line, code: entry.code, fence: entry.fence });
+		const text = displayText(line);
+		const kind = line.startsWith("Think ›")
+			? "think"
+			: line.startsWith("[tool error]")
+				? "tool-error"
+				: line.startsWith("[tool]")
+					? "tool"
+					: line.startsWith("[new ") || line.startsWith("[resumed ")
+						? "meta"
+						: "assistant";
+		const display = kind === "assistant" || kind === "think"
+			? markdownDisplayText(text, entry.code, entry.fence)
+			: text;
+		pushScreenRows(rows, String(index), kind, display, width, {
+			code: entry.code,
+			fence: entry.fence,
+			...screenRowStyle(kind, text, entry.code, entry.fence)
+		});
 	}
-	if (entry.kind === "brand") {
-		return h(Text, { key: `${index}-${entry.text}`, color: BRAND, bold: entry.bold }, entry.text);
+	return rows;
+}
+
+function selectionBounds(selection) {
+	if (!selection) return null;
+	const a = selection.anchor;
+	const b = selection.focus;
+	if (a.row < b.row || (a.row === b.row && a.col <= b.col)) return { start: a, end: b };
+	return { start: b, end: a };
+}
+
+function hasSelectionSpan(selection) {
+	const bounds = selectionBounds(selection);
+	return Boolean(bounds && (bounds.start.row !== bounds.end.row || bounds.start.col !== bounds.end.col));
+}
+
+function offsetAtCell(text, cell) {
+	let width = 0;
+	let offset = 0;
+	for (const char of text) {
+		const next = width + Math.max(1, stringWidth(char));
+		if (cell < next) return offset;
+		width = next;
+		offset += char.length;
 	}
-	if (entry.kind === "hint") {
-		return h(Text, { key: `${index}-${entry.text}`, dimColor: true }, entry.text);
+	return text.length;
+}
+
+function selectedText(rows, selection) {
+	const bounds = selectionBounds(selection);
+	if (!bounds) return "";
+	const out = [];
+	for (let row = bounds.start.row; row <= bounds.end.row; row++) {
+		const text = rows[row]?.copyText ?? rows[row]?.text ?? "";
+		const start = row === bounds.start.row ? offsetAtCell(text, bounds.start.col) : 0;
+		const end = row === bounds.end.row ? offsetAtCell(text, bounds.end.col) : text.length;
+		out.push(text.slice(Math.min(start, end), Math.max(start, end)));
 	}
-	return h(Text, { key: `${index}-blank` }, " ");
-});
+	return out.join("\n").trimEnd();
+}
+
+function selectedCellRange(rowIndex, text, selection) {
+	const bounds = selectionBounds(selection);
+	if (!bounds || rowIndex < bounds.start.row || rowIndex > bounds.end.row) return null;
+	const start = rowIndex === bounds.start.row ? bounds.start.col : 0;
+	const end = rowIndex === bounds.end.row ? bounds.end.col : stringWidth(text);
+	if (start === end) return null;
+	const from = offsetAtCell(text, Math.min(start, end));
+	const to = offsetAtCell(text, Math.max(start, end));
+	if (from === to) return null;
+	return { from, to };
+}
+
+function SelectableRow({ row, rowIndex, selection, registerRow }) {
+	const range = selectedCellRange(rowIndex, row.text, selection);
+	const props = {
+		key: row.key,
+		color: row.color,
+		dimColor: row.dimColor,
+		bold: row.bold,
+		wrap: "truncate-end"
+	};
+	const children = range
+		? [
+				row.text.slice(0, range.from),
+				h(Text, { ...props, key: `${row.key}-selection`, inverse: true }, row.text.slice(range.from, range.to)),
+				row.text.slice(range.to)
+			]
+		: [row.text];
+	return h(
+		Box,
+		{
+			key: row.key,
+			ref: (node) => registerRow(rowIndex, node),
+			width: "100%",
+			height: 1,
+			minHeight: 1,
+			maxHeight: 1,
+			flexShrink: 0,
+			overflow: "hidden",
+			backgroundColor: row.backgroundColor
+		},
+		h(Text, props, ...children)
+	);
+}
 
 function isComposerNewline(key, inputKey) {
 	if (inputKey.return && (inputKey.shift || inputKey.meta)) return true;
@@ -336,16 +420,18 @@ function caretTag(caret) {
 function useKeyboardProtocol() {
 	useEffect(() => {
 		if (!process.stdout.isTTY) return;
-		process.stdout.write("\x1b[>4;2m\x1b[>5;1m\x1b[?1007h");
+		process.stdout.write("\x1b[>4;2m\x1b[>5;1m\x1b[?1007l");
 		return () => {
-			process.stdout.write("\x1b[>4;0m\x1b[>5;0m\x1b[?1007l");
+			process.stdout.write("\x1b[>4;0m\x1b[>5;0m");
 		};
 	}, []);
 }
 
-function useMouseWheel(onWheel, enabled) {
-	const callback = useRef(onWheel);
-	callback.current = onWheel;
+function useMouseWheel(onWheel, enabled, onPointer) {
+	const wheel = useRef(onWheel);
+	const pointer = useRef(onPointer);
+	wheel.current = onWheel;
+	pointer.current = onPointer;
 
 	useEffect(() => {
 		if (!enabled) return;
@@ -353,25 +439,39 @@ function useMouseWheel(onWheel, enabled) {
 		let pending = "";
 		const onData = (chunk) => {
 			pending += String(chunk);
-			const pattern = /\x1b\[<(\d+);\d+;\d+([Mm])/g;
+			const pattern = /\x1b\[<(\d+);(\d+);(\d+)([Mm])/g;
 			let match;
 			let consumed = 0;
 			while ((match = pattern.exec(pending))) {
 				consumed = pattern.lastIndex;
 				const button = Number(match[1]);
-				if (match[2] === "M" && (button & 64) !== 0) {
-					callback.current((button & 1) === 0 ? "up" : "down");
+				const marker = match[4];
+				if (marker === "M" && (button & 64) !== 0) {
+					wheel.current((button & 1) === 0 ? "up" : "down");
+					continue;
 				}
+				const motion = (button & 32) !== 0;
+				const which = button & 3;
+				if (marker === "m") {
+					pointer.current?.({ x: Number(match[2]), y: Number(match[3]), kind: "up" });
+					continue;
+				}
+				if (which !== 0) continue;
+				pointer.current?.({
+					x: Number(match[2]),
+					y: Number(match[3]),
+					kind: motion ? "drag" : "down"
+				});
 			}
 			pending = consumed > 0 ? pending.slice(consumed) : pending;
 			if (pending.length > 32) pending = pending.slice(-32);
 		};
 
 		process.stdin.prependListener("data", onData);
-		process.stdout.write("\x1b[?1000h\x1b[?1006h");
+		process.stdout.write("\x1b[?1002h\x1b[?1006h");
 		return () => {
 			process.stdin.removeListener("data", onData);
-			process.stdout.write("\x1b[?1000l\x1b[?1006l");
+			process.stdout.write("\x1b[?1002l\x1b[?1006l");
 		};
 	}, [enabled]);
 }
@@ -393,13 +493,12 @@ function App({ api, commands, initialState }) {
 	const [selected, setSelected] = useState(0);
 	const [modelMenu, setModelMenu] = useState(false);
 	const [scrollOffset, setScrollOffset] = useState(0);
+	const [docSelection, setDocSelection] = useState(null);
+	const rowRefs = useRef(new Map());
+	const rowBounds = useRef(new Map());
 	const { columns, rows } = useWindowSize();
 	const colCount = Math.max(1, columns ?? 80);
 	const rowCount = Math.max(1, rows ?? 24);
-	useEffect(() => {
-		if (!process.stdout.isTTY) return;
-		process.stdout.write("\x1b[?1007h");
-	}, [colCount, rowCount]);
 	const totalRowsRef = useRef(0);
 	const limits = useRef({ maxOffset: 0, pageSize: 1 });
 	const ignoreReturnUntil = useRef(0);
@@ -411,15 +510,13 @@ function App({ api, commands, initialState }) {
 	const document = useMemo(() => [
 		{ kind: "brand", bold: true, text: `DeepSeek Harness${state.project ? `  ·  ${state.project}` : ""}` },
 		...(state.banner ? state.banner.trim().split("\n").map((text) => ({ kind: "brand", text })) : []),
-		{ kind: "hint", text: "Type / for commands  ·  Shift+Enter newline  ·  Touchpad scroll  ·  Option/Alt-drag select" },
+		{ kind: "hint", text: "Type / for commands  ·  Shift+Enter newline  ·  Touchpad scroll  ·  Drag to copy text" },
 		{ kind: "blank" },
 		...transcriptEntries(transcript)
 	], [state.project, state.banner, transcript]);
-	const heights = useMemo(
-		() => document.map((entry) => entryRowCount(entry, colCount)),
-		[document, colCount]
-	);
-	const totalRows = useMemo(() => heights.reduce((sum, value) => sum + value, 0), [heights]);
+	const documentColumns = Math.max(1, colCount - 1);
+	const rowsDoc = useMemo(() => documentRows(document, documentColumns), [document, documentColumns]);
+	const totalRows = rowsDoc.length;
 	const menuRows = modelMenu ? models.slice(0, 9).length + 1 : matches.length > 0 ? matches.slice(0, 9).length : 0;
 	const statusRows = 2;
 	const hintRows = 2;
@@ -453,7 +550,9 @@ function App({ api, commands, initialState }) {
 		else offset = Math.min(Math.max(0, scrollOffset), maxOffset);
 	}
 	if (offset !== scrollOffset) setScrollOffset(offset);
-	const visible = sliceFromBottom(document, heights, offset, viewportRows);
+	const visibleEndRow = Math.max(0, totalRows - offset);
+	const visibleStartRow = Math.max(0, visibleEndRow - viewportRows);
+	const visibleRows = rowsDoc.slice(visibleStartRow, visibleEndRow);
 	const pageSize = Math.max(Math.floor(viewportRows * 0.8), 1);
 	limits.current = { maxOffset, pageSize };
 	const caretVisibleRow = caretPos.row - visibleStart;
@@ -462,6 +561,20 @@ function App({ api, commands, initialState }) {
 		y: documentPaneRows + menuRows + 2 + caretVisibleRow
 	});
 
+	const registerRow = (rowIndex, node) => {
+		if (node) rowRefs.current.set(rowIndex, node);
+		else rowRefs.current.delete(rowIndex);
+	};
+
+	useEffect(() => {
+		const measured = new Map();
+		for (const [rowIndex, node] of rowRefs.current.entries()) {
+			const bounds = measureElement(node);
+			if (bounds.width > 0 || bounds.height > 0) measured.set(rowIndex, bounds);
+		}
+		rowBounds.current = measured;
+	}, [visibleStartRow, visibleEndRow, colCount, rowCount, documentPaneRows]);
+
 	useMouseWheel((direction) => {
 		const { maxOffset: limit, pageSize: size } = limits.current;
 		const step = Math.max(Math.floor(size / 4), 1);
@@ -469,7 +582,60 @@ function App({ api, commands, initialState }) {
 			const next = direction === "up" ? value + step : value - step;
 			return Math.min(Math.max(0, next), limit);
 		});
-	}, true);
+	}, true, (event) => {
+		const pointFromMouse = (clampToRows = false) => {
+			const x = event.x - 1;
+			const y = event.y - 1;
+			const measuredRows = [...rowBounds.current.entries()].sort((a, b) => a[0] - b[0]);
+			if (!measuredRows.length) return null;
+			let fallback = null;
+			for (const [row, bounds] of measuredRows) {
+				const top = bounds.y;
+				const bottom = bounds.y + Math.max(1, bounds.height);
+				if (y >= top && y < bottom) {
+					return { row, col: Math.max(0, Math.min(x - bounds.x, Math.max(0, bounds.width - 1))) };
+				}
+				if (clampToRows) {
+					const distance = y < top ? top - y : y - bottom + 1;
+					if (!fallback || distance < fallback.distance) fallback = { row, bounds, distance };
+				}
+			}
+			if (!clampToRows || !fallback) return null;
+			return {
+				row: fallback.row,
+				col: Math.max(0, Math.min(x - fallback.bounds.x, Math.max(0, fallback.bounds.width - 1)))
+			};
+		};
+		if (event.kind === "down") {
+			const point = pointFromMouse(false);
+			if (!point) {
+				setDocSelection(null);
+				return;
+			}
+			setDocSelection({ anchor: point, focus: point, dragging: true });
+			return;
+		}
+		if (event.kind === "drag") {
+			const point = pointFromMouse(true);
+			if (!point) return;
+			setDocSelection((selection) => {
+				if (!selection?.dragging) return selection;
+				return { ...selection, focus: point };
+			});
+			return;
+		}
+		if (event.kind === "up") {
+			const point = pointFromMouse(true);
+			if (!point) return;
+			setDocSelection((selection) => {
+				if (!selection?.dragging) return selection;
+				const next = { ...selection, focus: point, dragging: false };
+				const text = selectedText(rowsDoc, next);
+				if (text) copyText(text);
+				return hasSelectionSpan(next) ? next : null;
+			});
+		}
+	});
 
 	useEffect(() => api.subscribe((update) => {
 		setState((previous) => ({ ...previous, ...update }));
@@ -486,6 +652,7 @@ function App({ api, commands, initialState }) {
 		setInput("");
 		setCaret(0);
 		setAnchor(null);
+		setDocSelection(null);
 		setSelected(0);
 		setScrollOffset(0);
 		await api.submit(line);
@@ -519,10 +686,15 @@ function App({ api, commands, initialState }) {
 	useInput((key, inputKey) => {
 		if (inputKey.eventType === "release") return;
 		if (key.startsWith("[<")) return;
-		if (inputKey.ctrl && key.toLowerCase() === "c") {
+		if ((inputKey.ctrl || inputKey.meta) && key.toLowerCase() === "c") {
 			const range = selectedRange();
 			if (range) {
 				copyText(input.slice(range.from, range.to));
+				return;
+			}
+			const documentText = selectedText(rowsDoc, docSelection);
+			if (documentText) {
+				copyText(documentText);
 				return;
 			}
 			if (state.turn === "running") api.cancel();
@@ -546,6 +718,7 @@ function App({ api, commands, initialState }) {
 		if (inputKey.escape) {
 			if (modelMenu) setModelMenu(false);
 			else if (selection) setAnchor(null);
+			else if (docSelection) setDocSelection(null);
 			return;
 		}
 		if (inputKey.pageUp) {
@@ -664,11 +837,11 @@ function App({ api, commands, initialState }) {
 		if (!inputKey.ctrl && !inputKey.meta && key) insertText(key.replace(/\r\n?/g, "\n"));
 	});
 
-	const olderHint = visible.startRow > 0
-		? `↑ ${visible.startRow} earlier lines · PgUp to scroll`
+	const olderHint = visibleStartRow > 0
+		? `↑ ${visibleStartRow} earlier lines · PgUp to scroll`
 		: " ";
-	const newerHint = visible.endRow < visible.total
-		? `↓ ${visible.total - visible.endRow} newer lines · PgDn to scroll`
+	const newerHint = visibleEndRow < totalRows
+		? `↓ ${totalRows - visibleEndRow} newer lines · PgDn to scroll`
 		: " ";
 
 	return h(
@@ -687,8 +860,8 @@ function App({ api, commands, initialState }) {
 				flexShrink: 0
 			},
 			h(Text, { dimColor: true, wrap: "truncate-end" }, olderHint),
-			...visible.entries.map((entry, index) =>
-				h(DocumentEntry, { key: `${visible.start + index}`, entry, index: visible.start + index })
+			...visibleRows.map((row, index) =>
+				h(SelectableRow, { key: `${visibleStartRow + index}-${row.key}`, row, rowIndex: visibleStartRow + index, selection: docSelection, registerRow })
 			),
 			h(Box, { flexGrow: 1, flexShrink: 1, minHeight: 0 }),
 			h(Text, { dimColor: true, wrap: "truncate-end" }, newerHint)
