@@ -2,9 +2,11 @@
 
 一个轻量、顺手、可恢复会话的 **DeepSeek Harness 终端 TUI profile**。
 
-它让你不用打开 Web UI，也能在终端里和 DSH coding agent 持续对话：有更舒服的输入框、会话恢复、轻量 Markdown 显示、触控板滚动、拖拽复制，以及新手友好的 `/model add` 模型配置。
+**开发初心：** 为了让deepseek能通过cli与我的其它cli Agent团队顺畅的协作，通过dsh cli实现任务接收、指派、验收、交付等工作流。
 
-> 适合想把 DSH 当成日常命令行 Agent 使用的人。
+同时，使用dsh-cli你不再需要启动端口监听、打开 Web UI，实现在终端里便捷的启动及与 DSH coding agent 持续对话：支持会话恢复、轻量 Markdown 显示、触控板滚动、拖拽复制，并特别为新手设计了友好的 `/model add` 模型配置入口。
+
+> 非常适合想通过终端更便捷的使用 DSH 及与我一样通过CLI 让Agent团队协作的人。
 
 ![dsh-cli 启动界面](screenshots/splash.png)
 
